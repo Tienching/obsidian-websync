@@ -642,9 +642,18 @@ export class SyncEngine {
 
   private async deleteRemoteFile(pathInput: string): Promise<void> {
     const path = normalizeVaultPath(pathInput);
-    if (await this.options.app.vault.adapter.exists(path)) {
+    const adapter = this.options.app.vault.adapter;
+    if (await adapter.exists(path)) {
       this.suppress(path);
-      await this.options.app.vault.adapter.remove(path);
+      const listed = await listFolderIfPossible(adapter, path);
+      if (listed) {
+        if (listed.files.length === 0 && listed.folders.length === 0 && isPrunableEmptyFolderCandidate(path)) {
+          await adapter.rmdir(path, false);
+          await this.pruneEmptyParentFolders(path);
+        }
+        return;
+      }
+      await adapter.remove(path);
     }
     await this.pruneEmptyParentFolders(path);
   }
@@ -752,6 +761,16 @@ function parentFolder(path: string): string {
 function isPrunableEmptyFolderCandidate(pathInput: string): boolean {
   const path = pathInput.toLowerCase();
   return path !== ".obsidian" && !path.startsWith(".obsidian/");
+}
+
+async function listFolderIfPossible(adapter: {
+  list(path: string): Promise<{ files: string[]; folders: string[] }>;
+}, path: string): Promise<{ files: string[]; folders: string[] } | undefined> {
+  try {
+    return await adapter.list(path);
+  } catch {
+    return undefined;
+  }
 }
 
 function addParentFolders(path: string, folders: Set<string>): void {

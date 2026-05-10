@@ -254,6 +254,66 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("WIKI 知识网络")).toBe(false);
   });
 
+  it("does not unlink directory tombstones as files", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({
+      "WIKI 知识网络/W1 索引地图/index.md": Buffer.from("still present")
+    });
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {},
+      pendingOps: []
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => ({
+        serverUrl: "ws://127.0.0.1/sync",
+        token: "secret",
+        vaultId: "vault",
+        deviceName: "iPhone",
+        autoConnect: false,
+        syncOnStart: false,
+        replaceLocalOnStart: false
+      }),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        reconcileSnapshot(manifest: ManifestSnapshot): Promise<void>;
+      }
+    ).reconcileSnapshot({
+      vaultId: "vault",
+      revision: 2,
+      files: {
+        "WIKI 知识网络": {
+          ...entry("WIKI 知识网络"),
+          revision: 2,
+          deleted: true
+        }
+      }
+    });
+
+    expect(await adapter.exists("WIKI 知识网络")).toBe(true);
+    expect(await adapter.exists("WIKI 知识网络/W1 索引地图/index.md")).toBe(true);
+    expect(state.knownFiles["WIKI 知识网络"]).toEqual({
+      hash: sha256Hex(Buffer.from("WIKI 知识网络")),
+      revision: 2,
+      deleted: true
+    });
+  });
+
   it("creates folders declared by the folder manifest", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
@@ -338,6 +398,9 @@ class FakeAdapter {
   }
 
   async remove(path: string): Promise<void> {
+    if (this.folders.has(path)) {
+      throw new Error(`EPERM: operation not permitted, unlink '${path}'`);
+    }
     this.files.delete(path);
   }
 
