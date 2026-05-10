@@ -86,6 +86,8 @@ Important variables:
 OBS_SYNC_HOST=127.0.0.1
 OBS_SYNC_PORT=5212
 OBS_SYNC_VAULT_ID=default
+# Optional: comma-separated legacy IDs accepted during bootstrap migration.
+OBS_SYNC_VAULT_ALIASES=
 OBS_SYNC_TOKEN=change-me
 OBS_SYNC_DATA_DIR=/home/ubuntu/obsidian-sync/data
 
@@ -195,6 +197,8 @@ If a mobile device does not have WebSync installed yet, it needs a bootstrap pat
 - `.obsidian/websync-folders.json`
 
 After WebSync is installed and enabled, WebSync can update its own plugin files. Obsidian still needs a full restart before newly downloaded plugin code is loaded.
+
+If a mobile client already has an old WebSync config and the bootstrap tool is unavailable, keep the production `OBS_SYNC_VAULT_ID` as the canonical vault id and temporarily put the old mobile value in `OBS_SYNC_VAULT_ALIASES`. This lets the stale client reconnect long enough to download the current plugin and vault content without exposing COS credentials.
 
 Recommended mobile flow:
 

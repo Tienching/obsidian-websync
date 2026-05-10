@@ -6,6 +6,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   vaultId: string;
+  vaultAliases: string[];
   syncToken: string;
   dataDir: string;
   proxyTarget?: string;
@@ -31,6 +32,7 @@ export function loadConfig(): ServerConfig {
     host: process.env.OBS_SYNC_HOST ?? "0.0.0.0",
     port: Number(process.env.OBS_SYNC_PORT ?? "8787"),
     vaultId: process.env.OBS_SYNC_VAULT_ID ?? "default",
+    vaultAliases: parseList(process.env.OBS_SYNC_VAULT_ALIASES),
     syncToken: required("OBS_SYNC_TOKEN"),
     dataDir: process.env.OBS_SYNC_DATA_DIR ?? "/home/ubuntu/obsidian-sync/data",
     proxyTarget: process.env.OBS_SYNC_PROXY_TARGET,
@@ -42,4 +44,11 @@ export function loadConfig(): ServerConfig {
       secretKey: required("COS_SECRET_KEY")
     }
   };
+}
+
+function parseList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

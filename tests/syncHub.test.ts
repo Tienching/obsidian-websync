@@ -57,6 +57,52 @@ describe("SyncHub", () => {
     socket.close();
   });
 
+  it("accepts configured vault ID aliases for bootstrap clients", async () => {
+    const { wsUrl } = await startHub({ vaultAliases: ["legacy"] });
+    const socket = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      socket.on("open", resolve);
+      socket.on("error", reject);
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: "hello",
+        protocolVersion: 1,
+        vaultId: "legacy",
+        deviceId: "old-phone",
+        deviceName: "Old Phone",
+        token: "secret"
+      })
+    );
+
+    await expect(nextMessage(socket)).resolves.toMatchObject({ type: "ready" });
+    socket.close();
+  });
+
+  it("still rejects unknown vault IDs", async () => {
+    const { wsUrl } = await startHub({ vaultAliases: ["legacy"] });
+    const socket = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      socket.on("open", resolve);
+      socket.on("error", reject);
+    });
+
+    socket.send(
+      JSON.stringify({
+        type: "hello",
+        protocolVersion: 1,
+        vaultId: "other",
+        deviceId: "other-phone",
+        deviceName: "Other Phone",
+        token: "secret"
+      })
+    );
+
+    await expect(nextMessage(socket)).resolves.toMatchObject({ type: "error", code: "vault_mismatch" });
+    socket.close();
+  });
+
   it("rejects absolute-form proxy URLs before contacting the proxy target", async () => {
     const { port } = await startHub({ proxyTarget: "http://127.0.0.1:1" });
 
@@ -99,7 +145,7 @@ describe("SyncHub", () => {
   });
 });
 
-async function startHub(options: { proxyTarget?: string } = {}): Promise<{
+async function startHub(options: { proxyTarget?: string; vaultAliases?: string[] } = {}): Promise<{
   baseUrl: string;
   port: number;
   store: ManifestStore;
@@ -111,6 +157,7 @@ async function startHub(options: { proxyTarget?: string } = {}): Promise<{
     host: "127.0.0.1",
     port: 0,
     vaultId: "vault",
+    vaultAliases: options.vaultAliases ?? [],
     syncToken: "secret",
     manifestStore: store,
     fileStore,

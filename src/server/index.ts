@@ -15,6 +15,7 @@ async function main(): Promise<void> {
     host: config.host,
     port: config.port,
     vaultId: config.vaultId,
+    vaultAliases: config.vaultAliases,
     syncToken: config.syncToken,
     manifestStore,
     fileStore,

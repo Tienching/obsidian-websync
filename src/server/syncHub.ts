@@ -27,6 +27,7 @@ interface SyncHubOptions {
   host: string;
   port: number;
   vaultId: string;
+  vaultAliases?: string[];
   syncToken: string;
   manifestStore: ManifestStore;
   fileStore: FileStore;
@@ -274,7 +275,7 @@ export class SyncHub {
       socket.close();
       return;
     }
-    if (message.vaultId !== this.options.vaultId) {
+    if (!this.isAcceptedVaultId(message.vaultId)) {
       this.send(socket, { type: "error", code: "vault_mismatch", message: "Vault id does not match this sync service" });
       socket.close();
       return;
@@ -287,6 +288,10 @@ export class SyncHub {
       vaultId: message.vaultId
     });
     this.send(socket, { type: "ready", revision: this.options.manifestStore.snapshot().revision });
+  }
+
+  private isAcceptedVaultId(vaultId: string): boolean {
+    return vaultId === this.options.vaultId || (this.options.vaultAliases ?? []).includes(vaultId);
   }
 
   private async handlePut(client: ClientState, message: PutMessage): Promise<void> {
