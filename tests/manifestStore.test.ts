@@ -138,6 +138,38 @@ describe("ManifestStore", () => {
     expect(store.snapshot().files).toEqual({});
   });
 
+  it("accepts plugin resources while excluding plugin device data", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    const put = await store.applyPut({
+      opId: "op1",
+      path: ".obsidian/plugins/dataview/main.js",
+      content: Buffer.from("plugin"),
+      hash: "hash-plugin",
+      size: 6,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+    const secret = await store.applyPut({
+      opId: "op2",
+      path: ".obsidian/plugins/dataview/data.json",
+      content: Buffer.from("{}"),
+      hash: "hash-data",
+      size: 2,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+
+    expect(put.kind).toBe("accepted");
+    expect(secret.kind).toBe("ignored");
+    expect(store.snapshot().files[".obsidian/plugins/dataview/main.js"]).toBeDefined();
+    expect(store.snapshot().files[".obsidian/plugins/dataview/data.json"]).toBeUndefined();
+  });
+
   it("serializes concurrent puts so stale bases become conflict files", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

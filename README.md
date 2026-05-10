@@ -47,17 +47,19 @@ Generated build output goes to `dist/` and is ignored by git.
 - Startup sync scans local files and reconciles with the remote manifest.
 - Offline local changes are queued.
 - Remote changes are pulled and written locally.
+- Sync direction is configurable per device: two-way, pull-only, or push-only.
 - Conflicts are preserved as `(... conflict from DEVICE TIMESTAMP)` files.
 - Conflict device names are resolved automatically from the local host/platform; they are not user-configured plugin settings.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
 - Snapshot tombstones delete local files and prune empty parent folders.
-- `.obsidian` sync is intentionally narrow:
+- `.obsidian` sync defaults to a narrow minimal set:
   - synced: `.obsidian/community-plugins.json`
   - synced: `.obsidian/websync-folders.json`
   - synced: `.obsidian/plugins/websync/main.js`
   - synced: `.obsidian/plugins/websync/manifest.json`
   - synced: `.obsidian/plugins/websync/styles.css`
-  - not synced: WebSync `data.json`, other plugins, workspaces, appearance, app config, and other device-local Obsidian config
+  - optionally synced: selected plugin resource folders under `.obsidian/plugins/<plugin-id>/`
+  - never synced: plugin `data.json`, WebSync queues, workspaces, appearance, app config, and other device-local Obsidian config
 
 ## Requirements
 
@@ -142,6 +144,21 @@ OBS_SYNC_SERVER_URL=wss://websync.example.com/sync \
 OBS_SYNC_TOKEN=your-token \
 npm run install:plugin
 ```
+
+## Client Sync Settings
+
+Each device can choose a sync direction:
+
+- `Two-way`: upload local changes and apply remote changes.
+- `Pull only`: apply remote changes but never upload this device's local changes.
+- `Push only`: upload local changes but do not write remote changes into this device.
+
+Obsidian config sync has two modes:
+
+- `Minimal`: sync only WebSync bootstrap files and `.obsidian/community-plugins.json`.
+- `Selected plugins`: additionally sync resources for comma-separated plugin IDs, such as `dataview` or `obsidian-marp-plugin`.
+
+Plugin `data.json` files are always excluded because they often contain tokens, local paths, or device-specific state.
 
 ## Run Server
 

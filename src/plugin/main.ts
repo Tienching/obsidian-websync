@@ -68,6 +68,7 @@ function mergeData(defaults: SyncPluginData, loaded: Partial<SyncPluginData> | n
     ...(loaded?.settings ?? {})
   };
   delete (settings as SyncPluginData["settings"] & { deviceName?: string }).deviceName;
+  settings.syncedPluginIds = Array.isArray(settings.syncedPluginIds) ? settings.syncedPluginIds : [];
   return {
     settings
   };

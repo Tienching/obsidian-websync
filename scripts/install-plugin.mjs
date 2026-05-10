@@ -53,6 +53,9 @@ function normalizeSettings(settings) {
     serverUrl: process.env.OBS_SYNC_SERVER_URL ?? settings.serverUrl ?? "wss://your-domain.example/sync",
     token: process.env.OBS_SYNC_TOKEN ?? settings.token ?? "",
     vaultId: settings.vaultId ?? "default",
+    syncDirection: settings.syncDirection ?? "two-way",
+    obsidianConfigSyncMode: settings.obsidianConfigSyncMode ?? "minimal",
+    syncedPluginIds: Array.isArray(settings.syncedPluginIds) ? settings.syncedPluginIds : [],
     autoConnect: settings.autoConnect ?? true,
     syncOnStart: settings.syncOnStart ?? true,
     replaceLocalOnStart: process.env.OBS_SYNC_REPLACE_LOCAL_ON_START === "true" || settings.replaceLocalOnStart === true

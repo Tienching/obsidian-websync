@@ -24,8 +24,23 @@ describe("path rules", () => {
     expect(isSyncablePath(".obsidian/appearance.json")).toBe(false);
     expect(isSyncablePath(".obsidian/core-plugins.json")).toBe(false);
     expect(isSyncablePath(".obsidian/workspace.json")).toBe(false);
+    expect(isSyncablePath(".obsidian")).toBe(false);
     expect(isSyncablePath(".trash/deleted.md")).toBe(false);
     expect(isSyncablePath("WIKI 知识网络/W1 索引地图/index.md")).toBe(true);
+  });
+
+  it("allows selected Obsidian plugin resources while still excluding plugin data", () => {
+    const options = { obsidianConfigSyncMode: "selected-plugins" as const, syncedPluginIds: ["dataview"] };
+
+    expect(isSyncablePath(".obsidian/plugins/dataview/main.js", options)).toBe(true);
+    expect(isSyncablePath(".obsidian/plugins/dataview/styles.css", options)).toBe(true);
+    expect(isSyncablePath(".obsidian/plugins/dataview/data.json", options)).toBe(false);
+    expect(isSyncablePath(".obsidian/plugins/calendar/main.js", options)).toBe(false);
+  });
+
+  it("can be relaxed server-side to accept any plugin resource except device data", () => {
+    expect(isSyncablePath(".obsidian/plugins/dataview/main.js", { syncedPluginIds: "all" })).toBe(true);
+    expect(isSyncablePath(".obsidian/plugins/remotely-save/data.json", { syncedPluginIds: "all" })).toBe(false);
   });
 
   it("creates readable conflict filenames without losing extension", () => {

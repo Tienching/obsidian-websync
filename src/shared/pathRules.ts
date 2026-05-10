@@ -1,4 +1,13 @@
 const FORBIDDEN_ROOT_SEGMENTS = new Set(["etc", "home", "root", "tmp", "usr", "var", "volumes", "windows"]);
+const MINIMAL_PLUGIN_IDS = new Set(["websync"]);
+
+export type ObsidianConfigSyncMode = "minimal" | "selected-plugins";
+export type SyncedPluginIds = readonly string[] | "all";
+
+export interface SyncPathOptions {
+  obsidianConfigSyncMode?: ObsidianConfigSyncMode;
+  syncedPluginIds?: SyncedPluginIds;
+}
 
 export function normalizeVaultPath(input: string): string {
   if (!input || input.includes("\0")) {
@@ -34,7 +43,7 @@ export function normalizeVaultPath(input: string): string {
   return parts.join("/");
 }
 
-export function isSyncablePath(input: string): boolean {
+export function isSyncablePath(input: string, options: SyncPathOptions = {}): boolean {
   let path: string;
   try {
     path = normalizeVaultPath(input);
@@ -49,29 +58,55 @@ export function isSyncablePath(input: string): boolean {
   if (lower === ".trash" || lower.startsWith(".trash/")) {
     return false;
   }
+  if (lower === ".obsidian") {
+    return false;
+  }
   if (lower.startsWith(".obsidian/")) {
     const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json" || lower === ".obsidian/websync-folders.json";
-    const isAllowedWebsyncPluginFile = lower.startsWith(".obsidian/plugins/websync/")
-      && lower !== ".obsidian/plugins/websync/data.json"
-      && !lower.startsWith(".obsidian/plugins/websync/.queue/");
-    return isAllowedObsidianFile || isAllowedWebsyncPluginFile;
-  }
-  if (lower === ".obsidian/workspace.json" || lower.startsWith(".obsidian/workspace")) {
-    return false;
-  }
-  if (lower === ".obsidian/plugins/websync/data.json") {
-    return false;
-  }
-  if (lower.startsWith(".obsidian/plugins/") && !lower.startsWith(".obsidian/plugins/websync/")) {
-    return false;
-  }
-  if (/^\.obsidian\/plugins\/[^/]+\/data\.json$/.test(lower)) {
-    return false;
-  }
-  if (lower.startsWith(".obsidian/plugins/websync/.queue/")) {
-    return false;
+    return isAllowedObsidianFile || isAllowedPluginResource(lower, options);
   }
   return true;
+}
+
+export function normalizePluginIds(ids: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids ?? []) {
+    const normalized = id.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(normalized) || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function isAllowedPluginResource(lowerPath: string, options: SyncPathOptions): boolean {
+  const match = /^\.obsidian\/plugins\/([^/]+)\/(.+)$/.exec(lowerPath);
+  if (!match) {
+    return false;
+  }
+
+  const pluginId = match[1];
+  const relativePath = match[2];
+  if (relativePath === "data.json" || relativePath.startsWith(".queue/") || relativePath.includes("/.queue/")) {
+    return false;
+  }
+
+  if (options.syncedPluginIds === "all") {
+    return true;
+  }
+
+  if (MINIMAL_PLUGIN_IDS.has(pluginId)) {
+    return true;
+  }
+
+  if (options.obsidianConfigSyncMode !== "selected-plugins") {
+    return false;
+  }
+
+  return normalizePluginIds(options.syncedPluginIds).includes(pluginId);
 }
 
 export function toConflictPath(pathInput: string, deviceNameInput: string, isoTimestamp: string): string {

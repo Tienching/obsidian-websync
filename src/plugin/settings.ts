@@ -1,10 +1,16 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
+import { normalizePluginIds, ObsidianConfigSyncMode } from "../shared/pathRules";
 import type WebSyncPlugin from "./main";
+
+export type SyncDirection = "two-way" | "pull-only" | "push-only";
 
 export interface SyncPluginSettings {
   serverUrl: string;
   token: string;
   vaultId: string;
+  syncDirection: SyncDirection;
+  obsidianConfigSyncMode: ObsidianConfigSyncMode;
+  syncedPluginIds: string[];
   autoConnect: boolean;
   syncOnStart: boolean;
   replaceLocalOnStart: boolean;
@@ -18,6 +24,9 @@ export const DEFAULT_SETTINGS: SyncPluginSettings = {
   serverUrl: "wss://your-domain.example/sync",
   token: "",
   vaultId: "default",
+  syncDirection: "two-way",
+  obsidianConfigSyncMode: "minimal",
+  syncedPluginIds: [],
   autoConnect: true,
   syncOnStart: true,
   replaceLocalOnStart: false
@@ -76,6 +85,52 @@ export class WebSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Sync direction")
+      .setDesc("Two-way is normal sync. Pull only never uploads this device. Push only never applies remote changes.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("two-way", "Two-way")
+          .addOption("pull-only", "Pull only")
+          .addOption("push-only", "Push only")
+          .setValue(this.plugin.data.settings.syncDirection)
+          .onChange(async (value) => {
+            this.plugin.data.settings.syncDirection = value as SyncDirection;
+            await this.plugin.savePluginData();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Obsidian config sync")
+      .setDesc("Minimal syncs WebSync bootstrap files. Selected plugins also sync chosen plugin resources.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("minimal", "Minimal")
+          .addOption("selected-plugins", "Selected plugins")
+          .setValue(this.plugin.data.settings.obsidianConfigSyncMode)
+          .onChange(async (value) => {
+            this.plugin.data.settings.obsidianConfigSyncMode = value as ObsidianConfigSyncMode;
+            await this.plugin.savePluginData();
+            this.display();
+          });
+      });
+
+    if (this.plugin.data.settings.obsidianConfigSyncMode === "selected-plugins") {
+      new Setting(containerEl)
+        .setName("Plugin IDs")
+        .setDesc("Comma, space, or newline separated plugin IDs. Plugin data.json files are always excluded.")
+        .addTextArea((text) => {
+          text
+            .setPlaceholder("dataview, obsidian-marp-plugin")
+            .setValue(formatPluginIds(this.plugin.data.settings.syncedPluginIds))
+            .onChange(async (value) => {
+              this.plugin.data.settings.syncedPluginIds = parsePluginIds(value);
+              await this.plugin.savePluginData();
+            });
+          text.inputEl.rows = 3;
+        });
+    }
+
+    new Setting(containerEl)
       .setName("Auto connect")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.data.settings.autoConnect).onChange(async (value) => {
@@ -103,4 +158,12 @@ export class WebSyncSettingTab extends PluginSettingTab {
         });
       });
   }
+}
+
+export function parsePluginIds(value: string): string[] {
+  return normalizePluginIds(value.split(/[\s,]+/));
+}
+
+function formatPluginIds(ids: string[]): string {
+  return ids.join(", ");
 }

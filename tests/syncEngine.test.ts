@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalSyncState } from "../src/plugin/localState";
+import type { SyncPluginSettings } from "../src/plugin/settings";
 import type { ManifestSnapshot } from "../src/shared/protocol";
 
 vi.mock("obsidian", () => ({
@@ -49,14 +50,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getDeviceName: () => "MacBook",
       getState: () => state,
       save: vi.fn(async () => undefined),
@@ -77,7 +71,7 @@ describe("SyncEngine helpers", () => {
     expect(state.pendingOps[0].path).toBe(conflictPath);
   });
 
-  it("can replace stale local vault content from the remote manifest while preserving sync plugins", async () => {
+  it("can replace stale local vault content from the remote manifest while preserving local-only plugins", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
       "Cache 缓存收集/C1 临时收集/old.md": Buffer.from("old cache"),
@@ -105,14 +99,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: true
-      }),
+      getSettings: () => settings({ replaceLocalOnStart: true }),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -135,7 +122,7 @@ describe("SyncEngine helpers", () => {
 
     expect(await adapter.exists("Cache 缓存收集/C1 临时收集/old.md")).toBe(false);
     expect(await adapter.exists("legacy-prefix/old.md")).toBe(false);
-    expect(await adapter.exists(".obsidian/plugins/calendar/main.js")).toBe(false);
+    expect(await adapter.exists(".obsidian/plugins/calendar/main.js")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(true);
     expect(await adapter.exists("Memo 备忘记录/M1 生活记录/keep.md")).toBe(true);
@@ -165,14 +152,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -230,14 +210,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -283,14 +256,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -336,14 +302,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -357,6 +316,79 @@ describe("SyncEngine helpers", () => {
     ).handleLocalDelete({ path: "Wiki 知识网络/W1 索引地图" });
 
     expect(state.pendingOps).toEqual([]);
+  });
+
+  it("does not queue local scan changes in pull-only mode", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("local") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => [{ path: "note.md" }]
+        }
+      } as any,
+      getSettings: () => settings({ syncDirection: "pull-only", syncOnStart: true }),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        scanLocalFiles(): Promise<void>;
+      }
+    ).scanLocalFiles();
+
+    expect(state.pendingOps).toEqual([]);
+  });
+
+  it("ignores remote content in push-only mode", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings({ syncDirection: "push-only", syncOnStart: true }),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        applyRemoteChange(message: {
+          type: "remote-change";
+          action: "put";
+          originDeviceId: string;
+          entry: ReturnType<typeof entry>;
+          contentBase64: string;
+        }): Promise<void>;
+      }
+    ).applyRemoteChange({
+      type: "remote-change",
+      action: "put",
+      originDeviceId: "server",
+      entry: entry("note.md"),
+      contentBase64: Buffer.from("remote").toString("base64")
+    });
+
+    expect(await adapter.exists("note.md")).toBe(false);
+    expect(state.knownFiles).toEqual({});
   });
 
   it("creates folders declared by the folder manifest", async () => {
@@ -382,14 +414,7 @@ describe("SyncEngine helpers", () => {
           getFiles: () => []
         }
       } as any,
-      getSettings: () => ({
-        serverUrl: "ws://127.0.0.1/sync",
-        token: "secret",
-        vaultId: "vault",
-        autoConnect: false,
-        syncOnStart: false,
-        replaceLocalOnStart: false
-      }),
+      getSettings: () => settings(),
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -502,6 +527,21 @@ function toArrayBuffer(content: Buffer): ArrayBuffer {
   const out = new Uint8Array(content.byteLength);
   out.set(content);
   return out.buffer;
+}
+
+function settings(overrides: Partial<SyncPluginSettings> = {}): SyncPluginSettings {
+  return {
+    serverUrl: "ws://127.0.0.1/sync",
+    token: "secret",
+    vaultId: "vault",
+    syncDirection: "two-way",
+    obsidianConfigSyncMode: "minimal",
+    syncedPluginIds: [],
+    autoConnect: false,
+    syncOnStart: false,
+    replaceLocalOnStart: false,
+    ...overrides
+  };
 }
 
 function entry(path: string) {

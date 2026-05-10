@@ -5,6 +5,8 @@ import { ManifestFileEntry, ManifestSnapshot } from "../shared/protocol";
 import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pathRules";
 import { FileStore } from "./fileStore";
 
+const SERVER_PATH_OPTIONS = { syncedPluginIds: "all" as const };
+
 interface StoreOptions {
   dataDir: string;
   vaultId: string;
@@ -91,7 +93,7 @@ export class ManifestStore {
   }
 
   private async applyPutLocked(op: PutOperation): Promise<PutResult> {
-    if (!isSyncablePath(op.path)) {
+    if (!isSyncablePath(op.path, SERVER_PATH_OPTIONS)) {
       return { kind: "ignored", message: "Path is excluded from sync" };
     }
 
@@ -124,7 +126,7 @@ export class ManifestStore {
   }
 
   private async applyDeleteLocked(op: DeleteOperation): Promise<DeleteResult> {
-    if (!isSyncablePath(op.path)) {
+    if (!isSyncablePath(op.path, SERVER_PATH_OPTIONS)) {
       return { kind: "ignored", message: "Path is excluded from sync" };
     }
 

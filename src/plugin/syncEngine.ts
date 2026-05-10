@@ -9,7 +9,7 @@ import {
   RemoteChangeMessage,
   ServerMessage
 } from "../shared/protocol";
-import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pathRules";
+import { isSyncablePath, normalizeVaultPath, SyncPathOptions, toConflictPath } from "../shared/pathRules";
 import { resolveDeviceName } from "./deviceName";
 import { createOpId, knownFromEntry, LocalSyncState, PendingOperation } from "./localState";
 import { SyncPluginSettings } from "./settings";
@@ -149,7 +149,7 @@ export class SyncEngine {
 
   private schedulePut(pathInput: string): void {
     const path = safePath(pathInput);
-    if (!path || !isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
+    if (!path || !this.canUpload() || !this.isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
       return;
     }
     const oldTimer = this.debounceTimers.get(path);
@@ -169,7 +169,7 @@ export class SyncEngine {
       return;
     }
     const path = safePath(file.path);
-    if (!path || !isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
+    if (!path || !this.canUpload() || !this.isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
       return;
     }
     this.queueDelete(path);
@@ -177,12 +177,18 @@ export class SyncEngine {
   }
 
   private queuePut(path: string): void {
+    if (!this.canUpload() || !this.isSyncablePath(path)) {
+      return;
+    }
     const state = this.options.getState();
     const baseRevision = state.knownFiles[path]?.revision ?? this.remoteManifest?.files[path]?.revision ?? 0;
     this.replacePending({ opId: createOpId(state.deviceId), type: "put", path, baseRevision, createdAt: Date.now() });
   }
 
   private queueDelete(path: string): void {
+    if (!this.canUpload() || !this.isSyncablePath(path)) {
+      return;
+    }
     const state = this.options.getState();
     const baseRevision = state.knownFiles[path]?.revision ?? this.remoteManifest?.files[path]?.revision ?? 0;
     this.replacePending({ opId: createOpId(state.deviceId), type: "delete", path, baseRevision, createdAt: Date.now() });
@@ -258,7 +264,7 @@ export class SyncEngine {
   private async reconcileSnapshot(manifest: ManifestSnapshot): Promise<void> {
     const state = this.options.getState();
     const settings = this.options.getSettings();
-    const replaceLocalOnStart = settings.replaceLocalOnStart;
+    const replaceLocalOnStart = settings.replaceLocalOnStart && this.canApplyRemote();
 
     if (replaceLocalOnStart) {
       this.replacingLocalFromRemote = true;
@@ -269,23 +275,28 @@ export class SyncEngine {
     }
 
     try {
-      if (settings.syncOnStart && !replaceLocalOnStart) {
+      if (settings.syncOnStart && !replaceLocalOnStart && this.canUpload()) {
         await this.scanLocalFiles();
       }
-      for (const [path, entry] of Object.entries(manifest.files)) {
-        const localKnown = state.knownFiles[path];
-        if (entry.deleted) {
-          if (!localKnown || entry.revision >= localKnown.revision) {
-            await this.deleteRemoteFile(path);
-            state.knownFiles[path] = knownFromEntry(entry);
+      if (this.canApplyRemote()) {
+        for (const [path, entry] of Object.entries(manifest.files)) {
+          if (!this.isSyncablePath(path)) {
+            continue;
           }
-          continue;
+          const localKnown = state.knownFiles[path];
+          if (entry.deleted) {
+            if (!localKnown || entry.revision >= localKnown.revision) {
+              await this.deleteRemoteFile(path);
+              state.knownFiles[path] = knownFromEntry(entry);
+            }
+            continue;
+          }
+          if (!localKnown || localKnown.hash !== entry.hash || localKnown.revision < entry.revision) {
+            await this.requestPull(path);
+          }
         }
-        if (!localKnown || localKnown.hash !== entry.hash || localKnown.revision < entry.revision) {
-          await this.requestPull(path);
-        }
+        await this.ensureDeclaredFolders();
       }
-      await this.ensureDeclaredFolders();
     } finally {
       this.replacingLocalFromRemote = false;
     }
@@ -302,7 +313,7 @@ export class SyncEngine {
         continue;
       }
       const path = safePath(entry.path);
-      if (!path) {
+      if (!path || !this.isSyncablePath(path)) {
         continue;
       }
       remotePaths.add(path);
@@ -326,7 +337,7 @@ export class SyncEngine {
 
     for (const fileInput of listed.files) {
       const file = safePath(fileInput);
-      if (!file || isProtectedBootstrapPath(file) || remotePaths.has(file)) {
+      if (!file || !this.isSyncablePath(file) || isProtectedBootstrapPath(file) || remotePaths.has(file)) {
         continue;
       }
       this.suppress(file);
@@ -338,6 +349,9 @@ export class SyncEngine {
       if (!child || isProtectedBootstrapPath(child)) {
         continue;
       }
+      if (isExcludedObsidianPath(child, this.pathOptions()) && !isPotentialObsidianSyncAncestor(child, this.pathOptions())) {
+        continue;
+      }
       if (!remoteFolders.has(child) && !isProtectedBootstrapAncestor(child)) {
         await adapter.rmdir(child, true);
         continue;
@@ -347,9 +361,12 @@ export class SyncEngine {
   }
 
   private async scanLocalFiles(): Promise<void> {
+    if (!this.canUpload()) {
+      return;
+    }
     for (const file of this.options.app.vault.getFiles()) {
       const path = safePath(file.path);
-      if (!path || !isSyncablePath(path)) {
+      if (!path || !this.isSyncablePath(path)) {
         continue;
       }
       const hash = await this.hashFile(path);
@@ -366,7 +383,7 @@ export class SyncEngine {
   }
 
   private async flushQueue(): Promise<void> {
-    if (!this.isOpen()) {
+    if (!this.isOpen() || !this.canUpload()) {
       return;
     }
     const state = this.options.getState();
@@ -440,6 +457,9 @@ export class SyncEngine {
   }
 
   private async applyRemoteChange(message: RemoteChangeMessage): Promise<void> {
+    if (!this.canApplyRemote() || !this.isSyncablePath(message.entry.path)) {
+      return;
+    }
     if (message.action === "delete") {
       await this.deleteRemoteFile(message.entry.path);
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
@@ -458,6 +478,9 @@ export class SyncEngine {
   }
 
   private async applyPulledContent(message: FileContentMessage): Promise<void> {
+    if (!this.canApplyRemote() || !this.isSyncablePath(message.entry.path)) {
+      return;
+    }
     if (message.status === "found" && message.contentBase64) {
       await this.preserveLocalConflictIfNeeded(message.entry.path, message.entry.hash);
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
@@ -481,11 +504,18 @@ export class SyncEngine {
   }
 
   private async applyChunkedPulledContent(opId: string): Promise<void> {
+    if (!this.canApplyRemote()) {
+      this.fileDrafts.delete(opId);
+      return;
+    }
     const draft = this.fileDrafts.get(opId);
     if (!draft) {
       return;
     }
     this.fileDrafts.delete(opId);
+    if (!this.isSyncablePath(draft.entry.path)) {
+      return;
+    }
     const content = base64ChunksToArrayBuffer(draft.chunks);
     await this.preserveLocalConflictIfNeeded(draft.entry.path, draft.entry.hash);
     await this.writeRemoteFile(draft.entry.path, content);
@@ -549,7 +579,30 @@ export class SyncEngine {
     return this.options.getDeviceName?.() ?? resolveDeviceName(this.options.getState().deviceId);
   }
 
+  private canUpload(): boolean {
+    return this.options.getSettings().syncDirection !== "pull-only";
+  }
+
+  private canApplyRemote(): boolean {
+    return this.options.getSettings().syncDirection !== "push-only";
+  }
+
+  private isSyncablePath(path: string): boolean {
+    return isSyncablePath(path, this.pathOptions());
+  }
+
+  private pathOptions(): SyncPathOptions {
+    const settings = this.options.getSettings();
+    return {
+      obsidianConfigSyncMode: settings.obsidianConfigSyncMode,
+      syncedPluginIds: settings.syncedPluginIds
+    };
+  }
+
   private async requestPull(path: string): Promise<void> {
+    if (!this.canApplyRemote() || !this.isSyncablePath(path)) {
+      return;
+    }
     const entry = this.remoteManifest?.files[path];
     if (entry && !entry.deleted) {
       const content = await this.fetchRemoteFile(path);
@@ -804,6 +857,20 @@ function isProtectedBootstrapPath(pathInput: string): boolean {
 function isProtectedBootstrapAncestor(pathInput: string): boolean {
   const path = pathInput.toLowerCase();
   return ".obsidian/plugins/websync".startsWith(`${path}/`) || ".obsidian/plugins/remotely-save".startsWith(`${path}/`);
+}
+
+function isExcludedObsidianPath(path: string, options: SyncPathOptions): boolean {
+  const lower = path.toLowerCase();
+  return (lower === ".obsidian" || lower.startsWith(".obsidian/")) && !isSyncablePath(path, options);
+}
+
+function isPotentialObsidianSyncAncestor(path: string, options: SyncPathOptions): boolean {
+  const lower = path.toLowerCase();
+  if (lower === ".obsidian" || lower === ".obsidian/plugins") {
+    return true;
+  }
+  const pluginFolder = /^\.obsidian\/plugins\/([^/]+)$/.exec(lower);
+  return Boolean(pluginFolder && isSyncablePath(`${lower}/main.js`, options));
 }
 
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
