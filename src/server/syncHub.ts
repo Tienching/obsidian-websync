@@ -324,6 +324,19 @@ export class SyncHub {
       return;
     }
 
+    if (result.kind === "stale") {
+      const canonicalContent = await this.options.fileStore.getFile(result.entry.path);
+      this.send(client.socket, {
+        type: "ack",
+        opId: message.opId,
+        status: "stale",
+        entry: result.entry,
+        canonicalContentBase64: canonicalContent?.toString("base64"),
+        message: result.message
+      });
+      return;
+    }
+
     if (result.kind === "conflict") {
       const canonicalContent = await this.options.fileStore.getFile(result.canonicalEntry.path);
       const ack: AckMessage = {

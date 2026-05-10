@@ -4,6 +4,7 @@ import {
   FileContentChunkMessage,
   FileContentStartMessage,
   FileContentMessage,
+  ManifestFileEntry,
   ManifestSnapshot,
   PROTOCOL_VERSION,
   RemoteChangeMessage,
@@ -26,6 +27,11 @@ interface EngineOptions {
 
 interface InflightOperation extends PendingOperation {
   contentBase64?: string;
+}
+
+interface QueuePutOptions {
+  baseRevision?: number;
+  folderManifestBaseFolders?: string[];
 }
 
 export interface ForceScanOptions {
@@ -215,13 +221,21 @@ export class SyncEngine {
     void this.flushQueue();
   }
 
-  private queuePut(path: string): void {
+  private queuePut(path: string, options: QueuePutOptions = {}): void {
     if (!this.canUpload() || !this.isSyncablePath(path)) {
       return;
     }
     const state = this.options.getState();
-    const baseRevision = state.knownFiles[path]?.revision ?? this.remoteManifest?.files[path]?.revision ?? 0;
-    this.replacePending({ opId: createOpId(state.deviceId), type: "put", path, baseRevision, createdAt: Date.now() });
+    const existing = state.pendingOps.find((op) => op.type === "put" && op.path === path);
+    const baseRevision = options.baseRevision ?? existing?.baseRevision ?? state.knownFiles[path]?.revision ?? this.remoteManifest?.files[path]?.revision ?? 0;
+    const op: PendingOperation = { opId: createOpId(state.deviceId), type: "put", path, baseRevision, createdAt: Date.now() };
+    const folderManifestBaseFolders = path === FOLDER_MANIFEST_PATH
+      ? options.folderManifestBaseFolders ?? existing?.folderManifestBaseFolders
+      : undefined;
+    if (folderManifestBaseFolders !== undefined) {
+      op.folderManifestBaseFolders = folderManifestBaseFolders;
+    }
+    this.replacePending(op);
   }
 
   private queueDelete(path: string): void {
@@ -428,12 +442,15 @@ export class SyncEngine {
     }
 
     const folders = await this.collectDeclaredFolders("");
-    const next = `${JSON.stringify({ version: 1, folders }, null, 2)}\n`;
+    const next = formatFolderManifest(folders);
     const adapter = this.options.app.vault.adapter;
+    const existing = this.options.getState().pendingOps.find((op) => op.type === "put" && op.path === FOLDER_MANIFEST_PATH);
+    let baseFolders = existing?.folderManifestBaseFolders;
     let current = "";
     try {
       if (await adapter.exists(FOLDER_MANIFEST_PATH)) {
-        current = new TextDecoder().decode(await adapter.readBinary(FOLDER_MANIFEST_PATH));
+        current = arrayBufferToText(await adapter.readBinary(FOLDER_MANIFEST_PATH));
+        baseFolders ??= parseFolderManifestFolders(current);
       }
     } catch {
       current = "";
@@ -444,8 +461,8 @@ export class SyncEngine {
 
     await ensureParentFolder(this.options.app, FOLDER_MANIFEST_PATH);
     this.suppress(FOLDER_MANIFEST_PATH);
-    await adapter.writeBinary(FOLDER_MANIFEST_PATH, new TextEncoder().encode(next).buffer);
-    this.queuePut(FOLDER_MANIFEST_PATH);
+    await adapter.writeBinary(FOLDER_MANIFEST_PATH, textToArrayBuffer(next));
+    this.queuePut(FOLDER_MANIFEST_PATH, { folderManifestBaseFolders: baseFolders ?? [] });
   }
 
   private async collectDeclaredFolders(folder: string): Promise<string[]> {
@@ -538,6 +555,11 @@ export class SyncEngine {
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
     } else if (message.status === "deleted" && message.entry) {
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+    } else if (op && isFolderManifestRetryAck(message, op)) {
+      const canonicalEntry = message.status === "conflict" ? message.canonicalEntry : message.entry;
+      if (canonicalEntry) {
+        await this.mergeAndRetryFolderManifest(op, canonicalEntry, message.canonicalContentBase64);
+      }
     } else if (message.status === "conflict" && op?.contentBase64 && message.entry && message.canonicalEntry) {
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(op.contentBase64));
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
@@ -551,6 +573,30 @@ export class SyncEngine {
     }
 
     await this.options.save();
+  }
+
+  private async mergeAndRetryFolderManifest(op: InflightOperation, canonicalEntry: ManifestFileEntry, canonicalContentBase64?: string): Promise<void> {
+    if (!op.contentBase64 || !canonicalContentBase64) {
+      await this.requestPull(FOLDER_MANIFEST_PATH);
+      return;
+    }
+
+    const baseFolders = op.folderManifestBaseFolders ?? [];
+    const localFolders = parseFolderManifestFolders(arrayBufferToText(base64ToArrayBuffer(op.contentBase64)));
+    const remoteFolders = parseFolderManifestFolders(arrayBufferToText(base64ToArrayBuffer(canonicalContentBase64)));
+    const mergedFolders = mergeFolderManifestFolders(baseFolders, localFolders, remoteFolders);
+    const merged = formatFolderManifest(mergedFolders);
+
+    this.options.getState().knownFiles[FOLDER_MANIFEST_PATH] = knownFromEntry(canonicalEntry);
+    await ensureParentFolder(this.options.app, FOLDER_MANIFEST_PATH);
+    this.suppress(FOLDER_MANIFEST_PATH);
+    await this.options.app.vault.adapter.writeBinary(FOLDER_MANIFEST_PATH, textToArrayBuffer(merged));
+    await this.ensureDeclaredFolders({ pruneUndeclared: true });
+    this.queuePut(FOLDER_MANIFEST_PATH, {
+      baseRevision: canonicalEntry.revision,
+      folderManifestBaseFolders: remoteFolders
+    });
+    await this.flushQueue();
   }
 
   private async applyRemoteChange(message: RemoteChangeMessage): Promise<void> {
@@ -713,6 +759,9 @@ export class SyncEngine {
   }
 
   private async preserveLocalConflictIfNeeded(path: string, incomingHash: string): Promise<void> {
+    if (path === FOLDER_MANIFEST_PATH) {
+      return;
+    }
     if (this.replacingLocalFromRemote) {
       return;
     }
@@ -1045,9 +1094,71 @@ function isFolderManifestCandidate(pathInput: string): boolean {
     && !path.startsWith(".trash/");
 }
 
+function isFolderManifestRetryAck(message: AckMessage, op: InflightOperation): boolean {
+  return op?.path === FOLDER_MANIFEST_PATH
+    && Boolean(op.contentBase64)
+    && Boolean(message.canonicalContentBase64)
+    && (message.status === "stale" || message.status === "conflict");
+}
+
+function formatFolderManifest(folders: string[]): string {
+  return `${JSON.stringify({ version: 1, folders: sortFolderPaths(folders) }, null, 2)}\n`;
+}
+
+function parseFolderManifestFolders(text: string): string[] {
+  try {
+    const parsed = JSON.parse(text) as { folders?: unknown };
+    if (!Array.isArray(parsed.folders)) {
+      return [];
+    }
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const folderInput of parsed.folders) {
+      const folder = typeof folderInput === "string" ? safePath(folderInput) : undefined;
+      if (!folder || !isFolderManifestCandidate(folder) || seen.has(folder)) {
+        continue;
+      }
+      seen.add(folder);
+      out.push(folder);
+    }
+    return sortFolderPaths(out);
+  } catch {
+    return [];
+  }
+}
+
+function mergeFolderManifestFolders(baseFolders: string[], localFolders: string[], remoteFolders: string[]): string[] {
+  const base = new Set(baseFolders);
+  const local = new Set(localFolders);
+  const merged = new Set(remoteFolders);
+  for (const folder of local) {
+    if (!base.has(folder)) {
+      merged.add(folder);
+    }
+  }
+  for (const folder of base) {
+    if (!local.has(folder)) {
+      merged.delete(folder);
+    }
+  }
+  return sortFolderPaths([...merged]);
+}
+
+function sortFolderPaths(folders: string[]): string[] {
+  return [...folders].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+}
+
 function isIgnorableEmptyFolderFile(pathInput: string): boolean {
   const path = pathInput.toLowerCase();
   return path === ".ds_store" || path.endsWith("/.ds_store") || path === "thumbs.db" || path.endsWith("/thumbs.db");
+}
+
+function arrayBufferToText(buffer: ArrayBuffer): string {
+  return new TextDecoder().decode(buffer);
+}
+
+function textToArrayBuffer(text: string): ArrayBuffer {
+  return new TextEncoder().encode(text).buffer;
 }
 
 async function sleep(ms: number): Promise<void> {

@@ -6,6 +6,7 @@ export interface PendingOperation {
   path: string;
   baseRevision: number;
   createdAt: number;
+  folderManifestBaseFolders?: string[];
 }
 
 export interface KnownFileState {

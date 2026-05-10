@@ -77,6 +77,46 @@ describe("ManifestStore", () => {
     expect(store.snapshot().files["WIKI/a (conflict from iPhone 20260509-143001).md"].hash).toBe("hash-phone");
   });
 
+  it("returns stale instead of creating conflict copies for concurrent folder manifests", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+    const firstContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old"] }));
+    const secondContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old", "New"] }));
+
+    const first = await store.applyPut({
+      opId: "op1",
+      path: ".obsidian/websync-folders.json",
+      content: firstContent,
+      hash: "hash-first",
+      size: firstContent.byteLength,
+      baseRevision: 0,
+      deviceId: "iphone",
+      deviceName: "iPhone",
+      mtime: 1
+    });
+    if (first.kind !== "accepted") {
+      throw new Error("expected accepted folder manifest");
+    }
+
+    const second = await store.applyPut({
+      opId: "op2",
+      path: ".obsidian/websync-folders.json",
+      content: secondContent,
+      hash: "hash-second",
+      size: secondContent.byteLength,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 2,
+      now: "2026-05-09T14:30:01.000Z"
+    });
+
+    expect(second.kind).toBe("stale");
+    expect(Object.keys(store.snapshot().files).filter((path) => path.includes("websync-folders"))).toEqual([
+      ".obsidian/websync-folders.json"
+    ]);
+    expect(store.snapshot().files[".obsidian/websync-folders.json"].hash).toBe("hash-first");
+  });
+
   it("marks deletes as tombstones and rejects stale deletes", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

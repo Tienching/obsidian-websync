@@ -6,6 +6,7 @@ import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pa
 import { FileStore } from "./fileStore";
 
 const SERVER_PATH_OPTIONS = { syncedPluginIds: "all" as const };
+const FOLDER_MANIFEST_PATH = ".obsidian/websync-folders.json";
 
 interface StoreOptions {
   dataDir: string;
@@ -38,6 +39,7 @@ export interface DeleteOperation {
 export type PutResult =
   | { kind: "accepted"; entry: ManifestFileEntry }
   | { kind: "conflict"; entry: ManifestFileEntry; canonicalEntry: ManifestFileEntry }
+  | { kind: "stale"; entry: ManifestFileEntry; message: string }
   | { kind: "ignored"; entry?: ManifestFileEntry; message: string };
 
 export type DeleteResult =
@@ -105,6 +107,9 @@ export class ManifestStore {
     }
 
     const hasStaleBase = current && !current.deleted && current.revision > op.baseRevision && current.updatedBy !== op.deviceId;
+    if (hasStaleBase && path === FOLDER_MANIFEST_PATH) {
+      return { kind: "stale", entry: current, message: "Folder manifest changed first" };
+    }
     const targetPath = hasStaleBase ? toConflictPath(path, op.deviceName, op.now ?? new Date().toISOString()) : path;
 
     await this.options.fileStore.putFile(targetPath, op.content);

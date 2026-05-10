@@ -543,6 +543,85 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("Keep 有内容/note.md")).toBe(true);
   });
 
+  it("merges stale folder manifest acks instead of restoring remote-deleted folders", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const baseContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old"] }));
+    const localContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old", "New"] }));
+    const remoteContent = Buffer.from(JSON.stringify({ version: 1, folders: [] }));
+    const adapter = new FakeAdapter({
+      ".obsidian/websync-folders.json": localContent
+    });
+    adapter.folders.add("Old");
+    adapter.folders.add("New");
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        ".obsidian/websync-folders.json": { hash: sha256Hex(baseContent), revision: 1 }
+      },
+      pendingOps: [{
+        opId: "folder-op",
+        type: "put",
+        path: ".obsidian/websync-folders.json",
+        baseRevision: 1,
+        createdAt: 1,
+        folderManifestBaseFolders: ["Old"]
+      } as LocalSyncState["pendingOps"][number]]
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (
+      engine as unknown as {
+        inflight: Map<string, unknown>;
+      }
+    ).inflight.set("folder-op", {
+      ...state.pendingOps[0],
+      contentBase64: localContent.toString("base64")
+    });
+
+    await (
+      engine as unknown as {
+        handleAck(message: unknown): Promise<void>;
+      }
+    ).handleAck({
+      type: "ack",
+      opId: "folder-op",
+      status: "stale",
+      entry: {
+        ...entry(".obsidian/websync-folders.json"),
+        hash: sha256Hex(remoteContent),
+        revision: 2
+      },
+      canonicalContentBase64: remoteContent.toString("base64")
+    });
+
+    const merged = JSON.parse(adapter.readUtf8(".obsidian/websync-folders.json")) as { folders: string[] };
+    expect(merged.folders).toEqual(["New"]);
+    expect(await adapter.exists("Old")).toBe(false);
+    expect(await adapter.exists("New")).toBe(true);
+    expect([...adapter.files.keys()].filter((path) => path.includes("conflict"))).toEqual([]);
+    expect(state.pendingOps).toHaveLength(1);
+    expect(state.pendingOps[0]).toMatchObject({
+      type: "put",
+      path: ".obsidian/websync-folders.json",
+      baseRevision: 2,
+      folderManifestBaseFolders: []
+    });
+  });
+
   it("writes and queues the folder manifest for local empty folders", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({});
