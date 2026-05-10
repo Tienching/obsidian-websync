@@ -1,7 +1,7 @@
 import { Notice, Plugin } from "obsidian";
 import { loadLocalState, LocalSyncState, saveLocalState } from "./localState";
 import { ForceScanOptions, SyncEngine, SyncStatusSnapshot } from "./syncEngine";
-import { createDefaultData, SyncPluginData, WebSyncSettingTab } from "./settings";
+import { createDefaultData, SyncPluginData, SyncPluginSettings, WebSyncSettingTab } from "./settings";
 
 export default class WebSyncPlugin extends Plugin {
   data: SyncPluginData = createDefaultData();
@@ -10,7 +10,7 @@ export default class WebSyncPlugin extends Plugin {
   private statusEl?: HTMLElement;
 
   async onload(): Promise<void> {
-    this.data = mergeData(createDefaultData(), (await this.loadData()) as Partial<SyncPluginData> | null);
+    this.data = mergeData(createDefaultData(), (await this.loadData()) as LoadedSyncPluginData);
     this.localState = loadLocalState(this.data.settings.vaultId);
     await this.savePluginData();
 
@@ -113,11 +113,21 @@ function formatStatusSnapshot(snapshot: SyncStatusSnapshot): string {
   return lines.join("\n");
 }
 
-function mergeData(defaults: SyncPluginData, loaded: Partial<SyncPluginData> | null): SyncPluginData {
+type LoadedSyncPluginData = {
+  settings?: Partial<SyncPluginSettings> & { deviceName?: string };
+} | null;
+
+export function mergeData(defaults: SyncPluginData, loaded: LoadedSyncPluginData): SyncPluginData {
+  const loadedSettings = loaded?.settings ?? {};
+  const priorSettingsVersion = typeof loadedSettings.settingsVersion === "number" ? loadedSettings.settingsVersion : 0;
   const settings = {
     ...defaults.settings,
-    ...(loaded?.settings ?? {})
+    ...loadedSettings
   };
+  if (priorSettingsVersion < 1 && loadedSettings.obsidianConfigSyncMode === "minimal") {
+    settings.obsidianConfigSyncMode = "standard";
+  }
+  settings.settingsVersion = Math.max(priorSettingsVersion, defaults.settings.settingsVersion);
   delete (settings as SyncPluginData["settings"] & { deviceName?: string }).deviceName;
   settings.syncedPluginIds = Array.isArray(settings.syncedPluginIds) ? settings.syncedPluginIds : [];
   return {

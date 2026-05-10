@@ -13,6 +13,22 @@ const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "default";
 const wipe = process.env.SEED_WIPE === "true";
 const manifestOut = process.env.SEED_MANIFEST_OUT ?? "/tmp/obsidian-sync-manifest.json";
 const concurrency = Number(process.env.SEED_CONCURRENCY ?? "6");
+const STANDARD_OBSIDIAN_CONFIG_FILES = new Set([
+  ".obsidian/app.json",
+  ".obsidian/appearance.json",
+  ".obsidian/backlink.json",
+  ".obsidian/canvas.json",
+  ".obsidian/core-plugins.json",
+  ".obsidian/core-plugins-migration.json",
+  ".obsidian/daily-notes.json",
+  ".obsidian/graph.json",
+  ".obsidian/hotkeys.json",
+  ".obsidian/page-preview.json",
+  ".obsidian/query.json",
+  ".obsidian/templates.json",
+  ".obsidian/types.json",
+  ".obsidian/zk-prefixer.json"
+]);
 
 const cos = new COS({
   SecretId: required("COS_SECRET_ID"),
@@ -158,7 +174,9 @@ function isSyncablePath(path) {
   if (lower === ".ds_store" || lower.endsWith("/.ds_store") || lower.endsWith("/thumbs.db")) return false;
   if (lower === ".trash" || lower.startsWith(".trash/")) return false;
   if (lower.startsWith(".obsidian/")) {
-    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json" || lower === ".obsidian/websync-folders.json";
+    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json"
+      || lower === ".obsidian/websync-folders.json"
+      || STANDARD_OBSIDIAN_CONFIG_FILES.has(lower);
     const isAllowedWebsyncPluginFile = lower.startsWith(".obsidian/plugins/websync/")
       && lower !== ".obsidian/plugins/websync/data.json"
       && !lower.startsWith(".obsidian/plugins/websync/.queue/");

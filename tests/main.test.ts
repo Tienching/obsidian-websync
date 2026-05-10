@@ -77,3 +77,34 @@ describe("manual sync command", () => {
     expect(noticeMessages).toEqual(["WebSync sync failed: network down"]);
   });
 });
+
+describe("plugin data migration", () => {
+  it("upgrades the old minimal config-sync default to standard once", async () => {
+    const { createDefaultData } = await import("../src/plugin/settings");
+    const { mergeData } = await import("../src/plugin/main");
+
+    const migrated = mergeData(createDefaultData(), {
+      settings: {
+        obsidianConfigSyncMode: "minimal"
+      }
+    });
+
+    expect(migrated.settings.obsidianConfigSyncMode).toBe("standard");
+    expect(migrated.settings.settingsVersion).toBe(1);
+  });
+
+  it("preserves an intentional minimal config-sync choice after migration", async () => {
+    const { createDefaultData } = await import("../src/plugin/settings");
+    const { mergeData } = await import("../src/plugin/main");
+
+    const migrated = mergeData(createDefaultData(), {
+      settings: {
+        obsidianConfigSyncMode: "minimal",
+        settingsVersion: 1
+      }
+    });
+
+    expect(migrated.settings.obsidianConfigSyncMode).toBe("minimal");
+    expect(migrated.settings.settingsVersion).toBe(1);
+  });
+});

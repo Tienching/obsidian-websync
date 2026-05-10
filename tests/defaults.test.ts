@@ -13,9 +13,9 @@ describe("default identifiers", () => {
     expect(DEFAULT_SETTINGS.vaultId).toBe("default");
   });
 
-  it("defaults to safe two-way minimal config sync", () => {
+  it("defaults to safe two-way standard config sync", () => {
     expect(DEFAULT_SETTINGS.syncDirection).toBe("two-way");
-    expect(DEFAULT_SETTINGS.obsidianConfigSyncMode).toBe("minimal");
+    expect(DEFAULT_SETTINGS.obsidianConfigSyncMode).toBe("standard");
     expect(DEFAULT_SETTINGS.syncedPluginIds).toEqual([]);
   });
 

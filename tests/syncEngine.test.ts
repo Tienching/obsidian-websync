@@ -994,18 +994,21 @@ function toArrayBuffer(content: Buffer): ArrayBuffer {
 }
 
 function settings(overrides: Partial<SyncPluginSettings> = {}): SyncPluginSettings {
-  return {
+  const merged = {
+    settingsVersion: 1,
     serverUrl: "ws://127.0.0.1/sync",
     token: "secret",
     vaultId: "vault",
     syncDirection: "two-way",
-    obsidianConfigSyncMode: "minimal",
+    obsidianConfigSyncMode: "standard",
     syncedPluginIds: [],
     autoConnect: false,
     syncOnStart: false,
     replaceLocalOnStart: false,
     ...overrides
   };
+  merged.settingsVersion = merged.settingsVersion ?? 1;
+  return merged as SyncPluginSettings;
 }
 
 function entry(path: string) {

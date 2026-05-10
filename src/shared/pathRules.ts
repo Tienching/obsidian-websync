@@ -1,7 +1,23 @@
 const FORBIDDEN_ROOT_SEGMENTS = new Set(["etc", "home", "root", "tmp", "usr", "var", "volumes", "windows"]);
 const MINIMAL_PLUGIN_IDS = new Set(["websync"]);
+const STANDARD_OBSIDIAN_CONFIG_FILES = new Set([
+  ".obsidian/app.json",
+  ".obsidian/appearance.json",
+  ".obsidian/backlink.json",
+  ".obsidian/canvas.json",
+  ".obsidian/core-plugins.json",
+  ".obsidian/core-plugins-migration.json",
+  ".obsidian/daily-notes.json",
+  ".obsidian/graph.json",
+  ".obsidian/hotkeys.json",
+  ".obsidian/page-preview.json",
+  ".obsidian/query.json",
+  ".obsidian/templates.json",
+  ".obsidian/types.json",
+  ".obsidian/zk-prefixer.json"
+]);
 
-export type ObsidianConfigSyncMode = "minimal" | "selected-plugins";
+export type ObsidianConfigSyncMode = "minimal" | "standard" | "selected-plugins";
 export type SyncedPluginIds = readonly string[] | "all";
 
 export interface SyncPathOptions {
@@ -62,7 +78,9 @@ export function isSyncablePath(input: string, options: SyncPathOptions = {}): bo
     return false;
   }
   if (lower.startsWith(".obsidian/")) {
-    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json" || lower === ".obsidian/websync-folders.json";
+    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json"
+      || lower === ".obsidian/websync-folders.json"
+      || isStandardObsidianConfig(lower, options);
     return isAllowedObsidianFile || isAllowedPluginResource(lower, options);
   }
   return true;
@@ -107,6 +125,12 @@ function isAllowedPluginResource(lowerPath: string, options: SyncPathOptions): b
   }
 
   return normalizePluginIds(options.syncedPluginIds).includes(pluginId);
+}
+
+function isStandardObsidianConfig(lowerPath: string, options: SyncPathOptions): boolean {
+  return options.obsidianConfigSyncMode !== undefined
+    && options.obsidianConfigSyncMode !== "minimal"
+    && STANDARD_OBSIDIAN_CONFIG_FILES.has(lowerPath);
 }
 
 export function toConflictPath(pathInput: string, deviceNameInput: string, isoTimestamp: string): string {

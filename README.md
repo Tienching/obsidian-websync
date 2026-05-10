@@ -58,14 +58,15 @@ Generated build output goes to `dist/` and is ignored by git.
 - The command palette has `WebSync: Show sync diagnostics` for queue, inflight, revision, last sync, and last error state.
 - The service exposes an authorized `GET /oplog?after=REV&limit=N` endpoint for recent operation diagnostics.
 - Snapshot tombstones delete local files and prune empty parent folders.
-- `.obsidian` sync defaults to a narrow minimal set:
+- `.obsidian` sync defaults to a standard stable set:
   - synced: `.obsidian/community-plugins.json`
   - synced: `.obsidian/websync-folders.json`
+  - synced in `Standard`: stable Obsidian config such as `app.json`, `appearance.json`, `core-plugins.json`, `daily-notes.json`, `graph.json`, and `types.json`
   - synced: `.obsidian/plugins/websync/main.js`
   - synced: `.obsidian/plugins/websync/manifest.json`
   - synced: `.obsidian/plugins/websync/styles.css`
   - optionally synced: selected plugin resource folders under `.obsidian/plugins/<plugin-id>/`
-  - never synced: plugin `data.json`, WebSync queues, workspaces, appearance, app config, and other device-local Obsidian config
+  - never synced: plugin `data.json`, WebSync queues, workspaces, sync credentials, and other device-local Obsidian config
 
 ## Requirements
 
@@ -159,10 +160,11 @@ Each device can choose a sync direction:
 - `Pull only`: apply remote changes but never upload this device's local changes.
 - `Push only`: upload local changes but do not write remote changes into this device.
 
-Obsidian config sync has two modes:
+Obsidian config sync has three modes:
 
 - `Minimal`: sync only WebSync bootstrap files and `.obsidian/community-plugins.json`.
-- `Selected plugins`: additionally sync resources for comma-separated plugin IDs, such as `dataview` or `obsidian-marp-plugin`.
+- `Standard`: additionally sync stable Obsidian settings such as attachment location, appearance, core plugin list, daily notes, graph, backlinks, canvas, and property types.
+- `Selected plugins`: includes `Standard`, then additionally syncs resources for comma-separated plugin IDs, such as `dataview` or `obsidian-marp-plugin`.
 
 Plugin `data.json` files are always excluded because they often contain tokens, local paths, or device-specific state.
 

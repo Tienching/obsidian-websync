@@ -5,7 +5,7 @@ import { ManifestFileEntry, ManifestSnapshot, OperationLogEntry } from "../share
 import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pathRules";
 import { FileStore } from "./fileStore";
 
-const SERVER_PATH_OPTIONS = { syncedPluginIds: "all" as const };
+const SERVER_PATH_OPTIONS = { obsidianConfigSyncMode: "standard" as const, syncedPluginIds: "all" as const };
 const FOLDER_MANIFEST_PATH = ".obsidian/websync-folders.json";
 
 interface StoreOptions {

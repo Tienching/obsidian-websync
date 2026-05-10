@@ -49,12 +49,18 @@ if (legacyPluginDir && existsSync(legacyPluginDir)) {
 console.log(`Installed WebSync to ${pluginDir}`);
 
 function normalizeSettings(settings) {
+  const settingsVersion = Number.isInteger(settings.settingsVersion) ? settings.settingsVersion : 0;
+  const obsidianConfigSyncMode = settings.obsidianConfigSyncMode === "minimal" && settingsVersion < 1
+    ? "standard"
+    : settings.obsidianConfigSyncMode ?? "standard";
+
   return {
+    settingsVersion: Math.max(settingsVersion, 1),
     serverUrl: process.env.OBS_SYNC_SERVER_URL ?? settings.serverUrl ?? "wss://your-domain.example/sync",
     token: process.env.OBS_SYNC_TOKEN ?? settings.token ?? "",
     vaultId: settings.vaultId ?? "default",
     syncDirection: settings.syncDirection ?? "two-way",
-    obsidianConfigSyncMode: settings.obsidianConfigSyncMode ?? "minimal",
+    obsidianConfigSyncMode,
     syncedPluginIds: Array.isArray(settings.syncedPluginIds) ? settings.syncedPluginIds : [],
     autoConnect: settings.autoConnect ?? true,
     syncOnStart: settings.syncOnStart ?? true,

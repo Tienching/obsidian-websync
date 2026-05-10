@@ -5,6 +5,7 @@ import type WebSyncPlugin from "./main";
 export type SyncDirection = "two-way" | "pull-only" | "push-only";
 
 export interface SyncPluginSettings {
+  settingsVersion: number;
   serverUrl: string;
   token: string;
   vaultId: string;
@@ -21,11 +22,12 @@ export interface SyncPluginData {
 }
 
 export const DEFAULT_SETTINGS: SyncPluginSettings = {
+  settingsVersion: 1,
   serverUrl: "wss://your-domain.example/sync",
   token: "",
   vaultId: "default",
   syncDirection: "two-way",
-  obsidianConfigSyncMode: "minimal",
+  obsidianConfigSyncMode: "standard",
   syncedPluginIds: [],
   autoConnect: true,
   syncOnStart: true,
@@ -101,10 +103,11 @@ export class WebSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Obsidian config sync")
-      .setDesc("Minimal syncs WebSync bootstrap files. Selected plugins also sync chosen plugin resources.")
+      .setDesc("Standard syncs stable Obsidian settings. Selected plugins also sync chosen plugin resources.")
       .addDropdown((dropdown) => {
         dropdown
           .addOption("minimal", "Minimal")
+          .addOption("standard", "Standard")
           .addOption("selected-plugins", "Selected plugins")
           .setValue(this.plugin.data.settings.obsidianConfigSyncMode)
           .onChange(async (value) => {

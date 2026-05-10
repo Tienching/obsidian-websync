@@ -11,6 +11,22 @@ const token = process.env.OBS_SYNC_TOKEN;
 const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "default";
 const deviceId = `seed-${randomUUID()}`;
 const deviceName = process.env.OBS_SYNC_DEVICE_NAME ?? "seed";
+const STANDARD_OBSIDIAN_CONFIG_FILES = new Set([
+  ".obsidian/app.json",
+  ".obsidian/appearance.json",
+  ".obsidian/backlink.json",
+  ".obsidian/canvas.json",
+  ".obsidian/core-plugins.json",
+  ".obsidian/core-plugins-migration.json",
+  ".obsidian/daily-notes.json",
+  ".obsidian/graph.json",
+  ".obsidian/hotkeys.json",
+  ".obsidian/page-preview.json",
+  ".obsidian/query.json",
+  ".obsidian/templates.json",
+  ".obsidian/types.json",
+  ".obsidian/zk-prefixer.json"
+]);
 
 if (!token) {
   throw new Error("OBS_SYNC_TOKEN is required");
@@ -185,7 +201,9 @@ function isSyncablePath(path) {
   if (lower === ".ds_store" || lower.endsWith("/.ds_store") || lower.endsWith("/thumbs.db")) return false;
   if (lower === ".trash" || lower.startsWith(".trash/")) return false;
   if (lower.startsWith(".obsidian/")) {
-    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json" || lower === ".obsidian/websync-folders.json";
+    const isAllowedObsidianFile = lower === ".obsidian/community-plugins.json"
+      || lower === ".obsidian/websync-folders.json"
+      || STANDARD_OBSIDIAN_CONFIG_FILES.has(lower);
     const isAllowedWebsyncPluginFile = lower.startsWith(".obsidian/plugins/websync/")
       && lower !== ".obsidian/plugins/websync/data.json"
       && !lower.startsWith(".obsidian/plugins/websync/.queue/");
