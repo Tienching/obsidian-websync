@@ -1005,33 +1005,10 @@ export class SyncEngine {
       if (listed) {
         if (listed.files.length === 0 && listed.folders.length === 0 && isPrunableEmptyFolderCandidate(path)) {
           await adapter.rmdir(path, false);
-          await this.pruneEmptyParentFolders(path);
         }
         return;
       }
       await adapter.remove(path);
-    }
-    await this.pruneEmptyParentFolders(path);
-  }
-
-  private async pruneEmptyParentFolders(path: string): Promise<void> {
-    let folder = parentFolder(path);
-    while (folder && isPrunableEmptyFolderCandidate(folder)) {
-      let listed: { files: string[]; folders: string[] };
-      try {
-        listed = await this.options.app.vault.adapter.list(folder);
-      } catch {
-        return;
-      }
-      if (listed.files.length > 0 || listed.folders.length > 0) {
-        return;
-      }
-      try {
-        await this.options.app.vault.adapter.rmdir(folder, false);
-      } catch {
-        return;
-      }
-      folder = parentFolder(folder);
     }
   }
 
@@ -1134,11 +1111,6 @@ function safePath(path: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function parentFolder(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash > 0 ? path.slice(0, slash) : "";
 }
 
 function isPrunableEmptyFolderCandidate(pathInput: string): boolean {

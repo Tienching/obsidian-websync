@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalSyncState } from "../src/plugin/localState";
 import type { SyncPluginSettings } from "../src/plugin/settings";
-import type { ManifestSnapshot } from "../src/shared/protocol";
+import type { ManifestFileEntry, ManifestSnapshot } from "../src/shared/protocol";
 
 vi.mock("obsidian", () => ({
   Notice: class Notice {},
@@ -176,7 +176,7 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists(".obsidian/plugins/remotely-save")).toBe(false);
   });
 
-  it("deletes local files when a snapshot contains remote tombstones", async () => {
+  it("deletes local files without pruning parent folders when a snapshot contains remote tombstones", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
       "WIKI 知识网络/W1 索引地图/index.md": Buffer.from("old uppercase wiki")
@@ -222,7 +222,8 @@ describe("SyncEngine helpers", () => {
     });
 
     expect(await adapter.exists("WIKI 知识网络/W1 索引地图/index.md")).toBe(false);
-    expect(await adapter.exists("WIKI 知识网络")).toBe(false);
+    expect(await adapter.exists("WIKI 知识网络/W1 索引地图")).toBe(true);
+    expect(await adapter.exists("WIKI 知识网络")).toBe(true);
     expect(state.knownFiles["WIKI 知识网络/W1 索引地图/index.md"]).toEqual({
       hash: sha256Hex(Buffer.from("WIKI 知识网络/W1 索引地图/index.md")),
       revision: 2,
@@ -230,7 +231,62 @@ describe("SyncEngine helpers", () => {
     });
   });
 
-  it("prunes empty parent folders when a tombstoned file is already missing locally", async () => {
+  it("keeps an empty parent folder when a realtime file tombstone arrives", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({
+      "Dash 操作中枢/D2 聚焦处理/Untitled.md": Buffer.from("scratch")
+    });
+    adapter.folders.add("Dash 操作中枢/D1 控制面板");
+    adapter.folders.add("Dash 操作中枢/D3 待办队列");
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        "Dash 操作中枢/D2 聚焦处理/Untitled.md": { hash: "old", revision: 1 }
+      },
+      pendingOps: []
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        applyRemoteChange(message: {
+          type: "remote-change";
+          action: "delete";
+          originDeviceId: string;
+          entry: ManifestFileEntry;
+        }): Promise<void>;
+      }
+    ).applyRemoteChange({
+      type: "remote-change",
+      action: "delete",
+      originDeviceId: "mac",
+      entry: {
+        ...entry("Dash 操作中枢/D2 聚焦处理/Untitled.md"),
+        revision: 2,
+        deleted: true
+      }
+    });
+
+    expect(await adapter.exists("Dash 操作中枢/D2 聚焦处理/Untitled.md")).toBe(false);
+    expect(await adapter.exists("Dash 操作中枢/D2 聚焦处理")).toBe(true);
+  });
+
+  it("does not prune parent folders when a tombstoned file is already missing locally", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({});
     adapter.folders.add("WIKI 知识网络");
@@ -279,7 +335,8 @@ describe("SyncEngine helpers", () => {
       }
     });
 
-    expect(await adapter.exists("WIKI 知识网络")).toBe(false);
+    expect(await adapter.exists("WIKI 知识网络/W1 索引地图")).toBe(true);
+    expect(await adapter.exists("WIKI 知识网络")).toBe(true);
   });
 
   it("does not unlink directory tombstones as files", async () => {

@@ -57,7 +57,7 @@ Generated build output goes to `dist/` and is ignored by git.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
 - The command palette has `WebSync: Show sync diagnostics` for queue, inflight, revision, last sync, and last error state.
 - The service exposes an authorized `GET /oplog?after=REV&limit=N` endpoint for recent operation diagnostics.
-- Snapshot tombstones delete local files and prune empty parent folders.
+- Snapshot tombstones delete local files. Empty folder creation and pruning are controlled by `.obsidian/websync-folders.json`.
 - `.obsidian` sync defaults to a standard stable set:
   - synced: `.obsidian/community-plugins.json`
   - synced: `.obsidian/websync-folders.json`
