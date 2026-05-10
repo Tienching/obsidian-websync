@@ -20,6 +20,9 @@ vi.mock("obsidian", () => ({
   },
   TFile: class TFile {
     constructor(readonly path: string) {}
+  },
+  TFolder: class TFolder {
+    constructor(readonly path: string) {}
   }
 }));
 
@@ -430,6 +433,47 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("Cache 缓存收集")).toBe(true);
     expect(await adapter.exists("Cache 缓存收集/C1 临时收集")).toBe(true);
     expect(await adapter.exists("Memo 备忘记录/M1 生活记录/M1.1 日常记事")).toBe(true);
+  });
+
+  it("writes and queues the folder manifest for local empty folders", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    adapter.folders.add("Dash 操作中枢");
+    adapter.folders.add("Dash 操作中枢/D1 控制面板");
+    adapter.folders.add("Empty 测试目录");
+    adapter.folders.add(".obsidian");
+    adapter.folders.add(".trash");
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        refreshFolderManifest(): Promise<void>;
+      }
+    ).refreshFolderManifest();
+
+    const manifest = JSON.parse(adapter.readUtf8(".obsidian/websync-folders.json")) as { folders: string[] };
+    expect(manifest.folders).toEqual([
+      "Dash 操作中枢",
+      "Empty 测试目录",
+      "Dash 操作中枢/D1 控制面板"
+    ]);
+    expect(state.pendingOps.map((op) => op.path)).toEqual([".obsidian/websync-folders.json"]);
   });
 });
 

@@ -233,7 +233,7 @@ Object stores and file manifests do not naturally preserve empty folders. WebSyn
 .obsidian/websync-folders.json
 ```
 
-When the plugin sees this file, it creates the declared folders locally. Regenerate this file after changing the intended empty-folder skeleton.
+The plugin automatically updates this file after local folder create, delete, or rename events, and during startup scans. When another device receives it, WebSync creates the declared folders locally. `.obsidian` folders and trash folders are excluded from this manifest.
 
 ## Case-Only Renames
 

@@ -1,4 +1,4 @@
-import { App, EventRef, Notice, TAbstractFile, TFile, normalizePath, requestUrl } from "obsidian";
+import { App, EventRef, Notice, TAbstractFile, TFile, TFolder, normalizePath, requestUrl } from "obsidian";
 import {
   AckMessage,
   FileContentChunkMessage,
@@ -33,6 +33,7 @@ const FOLDER_MANIFEST_PATH = ".obsidian/websync-folders.json";
 export class SyncEngine {
   private socket?: WebSocket;
   private reconnectTimer?: number;
+  private folderManifestTimer?: number;
   private readonly debounceTimers = new Map<string, number>();
   private readonly suppressedUntil = new Map<string, number>();
   private readonly inflight = new Map<string, InflightOperation>();
@@ -61,6 +62,10 @@ export class SyncEngine {
     if (this.reconnectTimer) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
+    }
+    if (this.folderManifestTimer) {
+      window.clearTimeout(this.folderManifestTimer);
+      this.folderManifestTimer = undefined;
     }
     for (const timer of this.debounceTimers.values()) {
       window.clearTimeout(timer);
@@ -121,6 +126,7 @@ export class SyncEngine {
 
   async forceScan(): Promise<void> {
     await this.scanLocalFiles();
+    await this.refreshFolderManifest();
     await this.flushQueue();
   }
 
@@ -129,6 +135,8 @@ export class SyncEngine {
     this.options.registerEvent(vault.on("create", (file) => {
       if (file instanceof TFile) {
         this.schedulePut(file.path);
+      } else if (file instanceof TFolder) {
+        this.scheduleFolderManifestUpdate();
       }
     }));
     this.options.registerEvent(vault.on("modify", (file) => {
@@ -143,8 +151,23 @@ export class SyncEngine {
       if (file instanceof TFile) {
         this.queueDelete(oldPath);
         this.schedulePut(file.path);
+      } else if (file instanceof TFolder) {
+        this.scheduleFolderManifestUpdate();
       }
     }));
+  }
+
+  private scheduleFolderManifestUpdate(): void {
+    if (!this.canUpload() || this.replacingLocalFromRemote) {
+      return;
+    }
+    if (this.folderManifestTimer) {
+      window.clearTimeout(this.folderManifestTimer);
+    }
+    this.folderManifestTimer = window.setTimeout(() => {
+      this.folderManifestTimer = undefined;
+      void this.refreshFolderManifest().then(() => this.flushQueue());
+    }, 900);
   }
 
   private schedulePut(pathInput: string): void {
@@ -165,6 +188,10 @@ export class SyncEngine {
   }
 
   private handleLocalDelete(file: TAbstractFile): void {
+    if (file instanceof TFolder) {
+      this.scheduleFolderManifestUpdate();
+      return;
+    }
     if (!(file instanceof TFile)) {
       return;
     }
@@ -277,6 +304,7 @@ export class SyncEngine {
     try {
       if (settings.syncOnStart && !replaceLocalOnStart && this.canUpload()) {
         await this.scanLocalFiles();
+        await this.refreshFolderManifest();
       }
       if (this.canApplyRemote()) {
         for (const [path, entry] of Object.entries(manifest.files)) {
@@ -380,6 +408,53 @@ export class SyncEngine {
         this.queuePut(path);
       }
     }
+  }
+
+  private async refreshFolderManifest(): Promise<void> {
+    if (!this.canUpload() || this.replacingLocalFromRemote) {
+      return;
+    }
+
+    const folders = await this.collectDeclaredFolders("");
+    const next = `${JSON.stringify({ version: 1, folders }, null, 2)}\n`;
+    const adapter = this.options.app.vault.adapter;
+    let current = "";
+    try {
+      if (await adapter.exists(FOLDER_MANIFEST_PATH)) {
+        current = new TextDecoder().decode(await adapter.readBinary(FOLDER_MANIFEST_PATH));
+      }
+    } catch {
+      current = "";
+    }
+    if (current === next) {
+      return;
+    }
+
+    await ensureParentFolder(this.options.app, FOLDER_MANIFEST_PATH);
+    this.suppress(FOLDER_MANIFEST_PATH);
+    await adapter.writeBinary(FOLDER_MANIFEST_PATH, new TextEncoder().encode(next).buffer);
+    this.queuePut(FOLDER_MANIFEST_PATH);
+  }
+
+  private async collectDeclaredFolders(folder: string): Promise<string[]> {
+    const adapter = this.options.app.vault.adapter;
+    let listed: { files: string[]; folders: string[] };
+    try {
+      listed = await adapter.list(folder);
+    } catch {
+      return [];
+    }
+
+    const out: string[] = [];
+    for (const childInput of listed.folders) {
+      const child = safePath(childInput);
+      if (!child || !isFolderManifestCandidate(child)) {
+        continue;
+      }
+      out.push(child);
+      out.push(...await this.collectDeclaredFolders(child));
+    }
+    return out.sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
   }
 
   private async flushQueue(): Promise<void> {
@@ -871,6 +946,14 @@ function isPotentialObsidianSyncAncestor(path: string, options: SyncPathOptions)
   }
   const pluginFolder = /^\.obsidian\/plugins\/([^/]+)$/.exec(lower);
   return Boolean(pluginFolder && isSyncablePath(`${lower}/main.js`, options));
+}
+
+function isFolderManifestCandidate(pathInput: string): boolean {
+  const path = pathInput.toLowerCase();
+  return path !== ".obsidian"
+    && !path.startsWith(".obsidian/")
+    && path !== ".trash"
+    && !path.startsWith(".trash/");
 }
 
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
