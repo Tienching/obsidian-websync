@@ -475,6 +475,60 @@ describe("SyncEngine helpers", () => {
     ]);
     expect(state.pendingOps.map((op) => op.path)).toEqual([".obsidian/websync-folders.json"]);
   });
+
+  it("waits for queued uploads to be acknowledged during a manual scan", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("hello") });
+    const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => [{ path: "note.md" }]
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (engine as unknown as { socket: typeof socket }).socket = socket;
+
+    let resolved = false;
+    const scan = (
+      engine as unknown as {
+        forceScan(options: { waitForIdle: boolean; idleTimeoutMs: number }): Promise<void>;
+        handleServerMessage(message: unknown): Promise<void>;
+      }
+    ).forceScan({ waitForIdle: true, idleTimeoutMs: 1_000 }).then(() => {
+      resolved = true;
+    });
+
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledTimes(2));
+    expect(resolved).toBe(false);
+
+    for (const op of [...state.pendingOps]) {
+      await (
+        engine as unknown as {
+          handleServerMessage(message: unknown): Promise<void>;
+        }
+      ).handleServerMessage({
+        type: "ack",
+        opId: op.opId,
+        status: "accepted",
+        entry: entry(op.path)
+      });
+    }
+    await scan;
+
+    expect(resolved).toBe(true);
+    expect(state.pendingOps).toEqual([]);
+  });
 });
 
 class FakeAdapter {

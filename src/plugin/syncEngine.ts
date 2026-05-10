@@ -28,6 +28,11 @@ interface InflightOperation extends PendingOperation {
   contentBase64?: string;
 }
 
+export interface ForceScanOptions {
+  waitForIdle?: boolean;
+  idleTimeoutMs?: number;
+}
+
 const FOLDER_MANIFEST_PATH = ".obsidian/websync-folders.json";
 
 export class SyncEngine {
@@ -124,10 +129,13 @@ export class SyncEngine {
     };
   }
 
-  async forceScan(): Promise<void> {
+  async forceScan(options: ForceScanOptions = {}): Promise<void> {
     await this.scanLocalFiles();
     await this.refreshFolderManifest();
     await this.flushQueue();
+    if (options.waitForIdle) {
+      await this.waitForSyncIdle(options.idleTimeoutMs ?? 30_000);
+    }
   }
 
   private registerVaultEvents(): void {
@@ -472,6 +480,16 @@ export class SyncEngine {
       } else {
         this.sendDelete(op);
       }
+    }
+  }
+
+  private async waitForSyncIdle(timeoutMs: number): Promise<void> {
+    const startedAt = Date.now();
+    while (this.options.getState().pendingOps.length > 0 || this.inflight.size > 0) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error("Sync did not finish before timeout");
+      }
+      await sleep(100);
     }
   }
 
@@ -954,6 +972,10 @@ function isFolderManifestCandidate(pathInput: string): boolean {
     && !path.startsWith(".obsidian/")
     && path !== ".trash"
     && !path.startsWith(".trash/");
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function sha256Hex(buffer: ArrayBuffer): Promise<string> {

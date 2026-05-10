@@ -1,6 +1,6 @@
 import { Notice, Plugin } from "obsidian";
 import { loadLocalState, LocalSyncState, saveLocalState } from "./localState";
-import { SyncEngine } from "./syncEngine";
+import { ForceScanOptions, SyncEngine } from "./syncEngine";
 import { createDefaultData, SyncPluginData, WebSyncSettingTab } from "./settings";
 
 export default class WebSyncPlugin extends Plugin {
@@ -28,8 +28,7 @@ export default class WebSyncPlugin extends Plugin {
 
     this.addSettingTab(new WebSyncSettingTab(this.app, this));
     this.addRibbonIcon("refresh-cw", "WebSync", () => {
-      void this.engine?.forceScan();
-      new Notice("WebSync scan queued");
+      void runManualForceScan(this.engine);
     });
 
     this.addCommand({
@@ -40,7 +39,7 @@ export default class WebSyncPlugin extends Plugin {
     this.addCommand({
       id: "force-scan",
       name: "Force local scan",
-      callback: () => void this.engine?.forceScan()
+      callback: () => void runManualForceScan(this.engine)
     });
 
     this.engine.start();
@@ -59,6 +58,24 @@ export default class WebSyncPlugin extends Plugin {
     if (this.statusEl) {
       this.statusEl.setText(status);
     }
+  }
+}
+
+interface ManualForceScanEngine {
+  forceScan(options?: ForceScanOptions): Promise<void>;
+}
+
+export async function runManualForceScan(engine: ManualForceScanEngine | undefined): Promise<void> {
+  if (!engine) {
+    new Notice("WebSync is not ready");
+    return;
+  }
+
+  try {
+    await engine.forceScan({ waitForIdle: true, idleTimeoutMs: 30_000 });
+    new Notice("WebSync sync complete");
+  } catch (error) {
+    new Notice(`WebSync sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
