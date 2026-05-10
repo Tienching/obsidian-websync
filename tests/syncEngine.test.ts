@@ -69,7 +69,7 @@ describe("SyncEngine helpers", () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
       "Cache 缓存收集/C1 临时收集/old.md": Buffer.from("old cache"),
-      "jonaszchen-v2/old.md": Buffer.from("old prefix"),
+      "legacy-prefix/old.md": Buffer.from("old prefix"),
       "Memo 备忘记录/M1 生活记录/keep.md": Buffer.from("remote already here"),
       ".obsidian/community-plugins.json": Buffer.from("[\"remotely-save\",\"websync\"]"),
       ".obsidian/plugins/calendar/main.js": Buffer.from("stale plugin"),
@@ -81,7 +81,7 @@ describe("SyncEngine helpers", () => {
       knownFiles: {
         "Cache 缓存收集/C1 临时收集/old.md": { hash: "old", revision: 1 }
       },
-      pendingOps: [{ opId: "pending-old", type: "put", path: "jonaszchen-v2/old.md", baseRevision: 0, createdAt: 1 }]
+      pendingOps: [{ opId: "pending-old", type: "put", path: "legacy-prefix/old.md", baseRevision: 0, createdAt: 1 }]
     };
     const engine = new SyncEngine({
       app: {
@@ -123,7 +123,7 @@ describe("SyncEngine helpers", () => {
     });
 
     expect(await adapter.exists("Cache 缓存收集/C1 临时收集/old.md")).toBe(false);
-    expect(await adapter.exists("jonaszchen-v2/old.md")).toBe(false);
+    expect(await adapter.exists("legacy-prefix/old.md")).toBe(false);
     expect(await adapter.exists(".obsidian/plugins/calendar/main.js")).toBe(false);
     expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(true);

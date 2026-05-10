@@ -30,7 +30,7 @@ export function loadConfig(): ServerConfig {
   return {
     host: process.env.OBS_SYNC_HOST ?? "0.0.0.0",
     port: Number(process.env.OBS_SYNC_PORT ?? "8787"),
-    vaultId: process.env.OBS_SYNC_VAULT_ID ?? "jonaszchen",
+    vaultId: process.env.OBS_SYNC_VAULT_ID ?? "default",
     syncToken: required("OBS_SYNC_TOKEN"),
     dataDir: process.env.OBS_SYNC_DATA_DIR ?? "/home/ubuntu/obsidian-sync/data",
     proxyTarget: process.env.OBS_SYNC_PROXY_TARGET,

@@ -2,13 +2,14 @@ import COS from "cos-nodejs-sdk-v5";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 
-const vault = process.env.OBSIDIAN_VAULT_PATH ?? "/Users/chenzhanghua/Documents/jonaszchen";
+const vault = process.env.OBSIDIAN_VAULT_PATH ?? join(homedir(), "Documents", "Obsidian");
 const bucket = required("COS_BUCKET");
 const region = required("COS_REGION");
 const prefix = (process.env.COS_PREFIX ?? "_websync").replace(/^\/+|\/+$/g, "");
-const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "jonaszchen";
+const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "default";
 const wipe = process.env.SEED_WIPE === "true";
 const manifestOut = process.env.SEED_MANIFEST_OUT ?? "/tmp/obsidian-sync-manifest.json";
 const concurrency = Number(process.env.SEED_CONCURRENCY ?? "6");

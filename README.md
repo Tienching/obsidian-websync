@@ -85,7 +85,7 @@ Important variables:
 ```bash
 OBS_SYNC_HOST=127.0.0.1
 OBS_SYNC_PORT=5212
-OBS_SYNC_VAULT_ID=jonaszchen
+OBS_SYNC_VAULT_ID=default
 OBS_SYNC_TOKEN=change-me
 OBS_SYNC_DATA_DIR=/home/ubuntu/obsidian-sync/data
 
@@ -120,7 +120,7 @@ npm run build:server
 
 ## Install Plugin Locally
 
-By default this installs into `/Users/chenzhanghua/Documents/jonaszchen`:
+By default this installs into `~/Documents/Obsidian`:
 
 ```bash
 npm run install:plugin

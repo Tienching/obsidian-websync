@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import WebSocket from "ws";
 
-const vault = process.env.OBSIDIAN_VAULT_PATH ?? "/Users/chenzhanghua/Documents/jonaszchen";
+const vault = process.env.OBSIDIAN_VAULT_PATH ?? join(homedir(), "Documents", "Obsidian");
 const serverUrl = process.env.OBS_SYNC_SERVER_URL ?? "wss://your-domain.example/sync";
 const token = process.env.OBS_SYNC_TOKEN;
-const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "jonaszchen";
+const vaultId = process.env.OBS_SYNC_VAULT_ID ?? "default";
 const deviceId = `seed-${randomUUID()}`;
 const deviceName = process.env.OBS_SYNC_DEVICE_NAME ?? "seed";
 

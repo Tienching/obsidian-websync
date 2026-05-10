@@ -18,7 +18,7 @@ export interface SyncPluginData {
 export const DEFAULT_SETTINGS: SyncPluginSettings = {
   serverUrl: "wss://your-domain.example/sync",
   token: "",
-  vaultId: "jonaszchen",
+  vaultId: "default",
   deviceName: defaultDeviceName(),
   autoConnect: true,
   syncOnStart: true,
@@ -72,7 +72,7 @@ export class WebSyncSettingTab extends PluginSettingTab {
       .setName("Vault ID")
       .addText((text) => {
         text.setValue(this.plugin.data.settings.vaultId).onChange(async (value) => {
-          this.plugin.data.settings.vaultId = value.trim() || "jonaszchen";
+          this.plugin.data.settings.vaultId = value.trim() || "default";
           await this.plugin.savePluginData();
         });
       });

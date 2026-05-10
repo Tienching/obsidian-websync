@@ -6,6 +6,13 @@ export class TFile {
   constructor(readonly path: string) {}
 }
 
+export class PluginSettingTab {
+  constructor(
+    readonly app?: unknown,
+    readonly plugin?: unknown
+  ) {}
+}
+
 export function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+/g, "/");
 }

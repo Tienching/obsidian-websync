@@ -17,7 +17,7 @@ afterEach(async () => {
 
 describe("ManifestStore", () => {
   it("accepts first put and increments revision", async () => {
-    const store = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore: new MemoryFileStore() });
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     const result = await store.applyPut({
       opId: "op1",
@@ -41,7 +41,7 @@ describe("ManifestStore", () => {
   });
 
   it("turns stale concurrent put into a conflict file", async () => {
-    const store = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore: new MemoryFileStore() });
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     await store.applyPut({
       opId: "op1",
@@ -78,7 +78,7 @@ describe("ManifestStore", () => {
   });
 
   it("marks deletes as tombstones and rejects stale deletes", async () => {
-    const store = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore: new MemoryFileStore() });
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     const put = await store.applyPut({
       opId: "op1",
@@ -122,7 +122,7 @@ describe("ManifestStore", () => {
   });
 
   it("serializes concurrent puts so stale bases become conflict files", async () => {
-    const store = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore: new MemoryFileStore() });
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     const [first, second] = await Promise.all([
       store.applyPut({
@@ -159,7 +159,7 @@ describe("ManifestStore", () => {
 
   it("reopens a persisted local manifest", async () => {
     const fileStore = new MemoryFileStore();
-    const store = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore });
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
     await store.applyPut({
       opId: "op1",
       path: "WIKI/persisted.md",
@@ -172,7 +172,7 @@ describe("ManifestStore", () => {
       mtime: 1
     });
 
-    const reopened = await ManifestStore.open({ dataDir: dir, vaultId: "jonaszchen", fileStore });
+    const reopened = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
     expect(reopened.snapshot().files["WIKI/persisted.md"].hash).toBe("hash-persisted");
     expect(reopened.snapshot().revision).toBe(1);
   });
