@@ -63,10 +63,12 @@ export default class WebSyncPlugin extends Plugin {
 }
 
 function mergeData(defaults: SyncPluginData, loaded: Partial<SyncPluginData> | null): SyncPluginData {
+  const settings = {
+    ...defaults.settings,
+    ...(loaded?.settings ?? {})
+  };
+  delete (settings as SyncPluginData["settings"] & { deviceName?: string }).deviceName;
   return {
-    settings: {
-      ...defaults.settings,
-      ...(loaded?.settings ?? {})
-    }
+    settings
   };
 }

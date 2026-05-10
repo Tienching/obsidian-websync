@@ -5,7 +5,6 @@ export interface SyncPluginSettings {
   serverUrl: string;
   token: string;
   vaultId: string;
-  deviceName: string;
   autoConnect: boolean;
   syncOnStart: boolean;
   replaceLocalOnStart: boolean;
@@ -19,7 +18,6 @@ export const DEFAULT_SETTINGS: SyncPluginSettings = {
   serverUrl: "wss://your-domain.example/sync",
   token: "",
   vaultId: "default",
-  deviceName: defaultDeviceName(),
   autoConnect: true,
   syncOnStart: true,
   replaceLocalOnStart: false
@@ -78,15 +76,6 @@ export class WebSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Device name")
-      .addText((text) => {
-        text.setValue(this.plugin.data.settings.deviceName).onChange(async (value) => {
-          this.plugin.data.settings.deviceName = value.trim() || defaultDeviceName();
-          await this.plugin.savePluginData();
-        });
-      });
-
-    new Setting(containerEl)
       .setName("Auto connect")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.data.settings.autoConnect).onChange(async (value) => {
@@ -114,9 +103,4 @@ export class WebSyncSettingTab extends PluginSettingTab {
         });
       });
   }
-}
-
-function defaultDeviceName(): string {
-  const nav = typeof navigator !== "undefined" ? navigator.platform || navigator.userAgent : "device";
-  return nav.replace(/\s+/g, " ").slice(0, 40) || "device";
 }

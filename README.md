@@ -48,6 +48,7 @@ Generated build output goes to `dist/` and is ignored by git.
 - Offline local changes are queued.
 - Remote changes are pulled and written locally.
 - Conflicts are preserved as `(... conflict from DEVICE TIMESTAMP)` files.
+- Conflict device names are resolved automatically from the local host/platform; they are not user-configured plugin settings.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
 - Snapshot tombstones delete local files and prune empty parent folders.
 - `.obsidian` sync is intentionally narrow:
@@ -139,7 +140,6 @@ Optional install-time settings:
 ```bash
 OBS_SYNC_SERVER_URL=wss://websync.example.com/sync \
 OBS_SYNC_TOKEN=your-token \
-OBS_SYNC_DEVICE_NAME=MacBook \
 npm run install:plugin
 ```
 

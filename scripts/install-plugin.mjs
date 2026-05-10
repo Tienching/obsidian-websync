@@ -53,7 +53,6 @@ function normalizeSettings(settings) {
     serverUrl: process.env.OBS_SYNC_SERVER_URL ?? settings.serverUrl ?? "wss://your-domain.example/sync",
     token: process.env.OBS_SYNC_TOKEN ?? settings.token ?? "",
     vaultId: settings.vaultId ?? "default",
-    deviceName: process.env.OBS_SYNC_DEVICE_NAME ?? settings.deviceName ?? "MacBook",
     autoConnect: settings.autoConnect ?? true,
     syncOnStart: settings.syncOnStart ?? true,
     replaceLocalOnStart: process.env.OBS_SYNC_REPLACE_LOCAL_ON_START === "true" || settings.replaceLocalOnStart === true

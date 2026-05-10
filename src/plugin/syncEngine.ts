@@ -10,6 +10,7 @@ import {
   ServerMessage
 } from "../shared/protocol";
 import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pathRules";
+import { resolveDeviceName } from "./deviceName";
 import { createOpId, knownFromEntry, LocalSyncState, PendingOperation } from "./localState";
 import { SyncPluginSettings } from "./settings";
 
@@ -17,6 +18,7 @@ interface EngineOptions {
   app: App;
   getSettings: () => SyncPluginSettings;
   getState: () => LocalSyncState;
+  getDeviceName?: () => string;
   save: () => Promise<void>;
   setStatus: (status: string) => void;
   registerEvent: (eventRef: EventRef) => void;
@@ -82,13 +84,14 @@ export class SyncEngine {
     this.options.setStatus("sync connecting");
 
     socket.onopen = () => {
+      const deviceName = this.getDeviceName();
       socket.send(
         JSON.stringify({
           type: "hello",
           protocolVersion: PROTOCOL_VERSION,
           vaultId: settings.vaultId,
           deviceId: this.options.getState().deviceId,
-          deviceName: settings.deviceName,
+          deviceName,
           token: settings.token
         })
       );
@@ -535,11 +538,15 @@ export class SyncEngine {
     const knownDirty = known && localHash !== known.hash;
     const unknownDiverged = !known && localHash !== incomingHash;
     if (localHash !== incomingHash && (knownDirty || unknownDiverged)) {
-      const conflictPath = toConflictPath(path, this.options.getSettings().deviceName, new Date().toISOString());
+      const conflictPath = toConflictPath(path, this.getDeviceName(), new Date().toISOString());
       await this.writeRemoteFile(conflictPath, localContent);
       this.queuePut(conflictPath);
       new Notice(`Local edit preserved: ${conflictPath}`);
     }
+  }
+
+  private getDeviceName(): string {
+    return this.options.getDeviceName?.() ?? resolveDeviceName(this.options.getState().deviceId);
   }
 
   private async requestPull(path: string): Promise<void> {

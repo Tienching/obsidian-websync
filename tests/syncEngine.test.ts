@@ -7,6 +7,16 @@ vi.mock("obsidian", () => ({
   Notice: class Notice {},
   normalizePath: (path: string) => path,
   requestUrl: vi.fn(),
+  Platform: {
+    isDesktopApp: false,
+    isIosApp: false,
+    isPhone: false,
+    isTablet: false,
+    isAndroidApp: false,
+    isWin: false,
+    isLinux: false,
+    isMacOS: false
+  },
   TFile: class TFile {
     constructor(readonly path: string) {}
   }
@@ -43,11 +53,11 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "MacBook",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
       }),
+      getDeviceName: () => "MacBook",
       getState: () => state,
       save: vi.fn(async () => undefined),
       setStatus: vi.fn(),
@@ -99,7 +109,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: true
@@ -160,7 +169,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
@@ -226,7 +234,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
@@ -280,7 +287,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
@@ -334,7 +340,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
@@ -381,7 +386,6 @@ describe("SyncEngine helpers", () => {
         serverUrl: "ws://127.0.0.1/sync",
         token: "secret",
         vaultId: "vault",
-        deviceName: "iPhone",
         autoConnect: false,
         syncOnStart: false,
         replaceLocalOnStart: false
