@@ -150,7 +150,7 @@ export class WebSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Replace local on next start")
-      .setDesc("One-time bootstrap for old devices. Keeps WebSync and Remotely Save, then makes this vault match the sync service.")
+      .setDesc("One-time bootstrap for old devices. Keeps WebSync itself, then makes this vault match the sync service.")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.data.settings.replaceLocalOnStart).onChange(async (value) => {
           this.plugin.data.settings.replaceLocalOnStart = value;

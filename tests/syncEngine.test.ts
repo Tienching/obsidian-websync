@@ -82,7 +82,6 @@ describe("SyncEngine helpers", () => {
       "Memo 备忘记录/M1 生活记录/keep.md": Buffer.from("remote already here"),
       ".obsidian/community-plugins.json": Buffer.from("[\"remotely-save\",\"websync\"]"),
       ".obsidian/plugins/calendar/main.js": Buffer.from("stale plugin"),
-      ".obsidian/plugins/remotely-save/main.js": Buffer.from("bootstrap helper"),
       ".obsidian/plugins/websync/main.js": Buffer.from("sync plugin")
     });
     const state: LocalSyncState = {
@@ -127,10 +126,54 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("legacy-prefix/old.md")).toBe(false);
     expect(await adapter.exists(".obsidian/plugins/calendar/main.js")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
-    expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(true);
     expect(await adapter.exists("Memo 备忘记录/M1 生活记录/keep.md")).toBe(true);
     expect(state.knownFiles).toEqual({});
     expect(state.pendingOps).toEqual([]);
+  });
+
+  it("does not give Remotely Save bootstrap protection during replace local", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({
+      ".obsidian/plugins/remotely-save/main.js": Buffer.from("old bootstrap helper"),
+      ".obsidian/plugins/websync/main.js": Buffer.from("sync plugin")
+    });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings({
+        replaceLocalOnStart: true,
+        obsidianConfigSyncMode: "selected-plugins",
+        syncedPluginIds: ["remotely-save"]
+      }),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        replaceLocalWithRemoteManifest(manifest: ManifestSnapshot): Promise<void>;
+      }
+    ).replaceLocalWithRemoteManifest({
+      vaultId: "vault",
+      revision: 10,
+      files: {
+        ".obsidian/plugins/websync/main.js": entry(".obsidian/plugins/websync/main.js")
+      }
+    });
+
+    expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
+    expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(false);
+    expect(await adapter.exists(".obsidian/plugins/remotely-save")).toBe(false);
   });
 
   it("deletes local files when a snapshot contains remote tombstones", async () => {

@@ -222,7 +222,7 @@ npm run seed:cos
 
 ## Mobile Bootstrap
 
-If a mobile device does not have WebSync installed yet, it needs a bootstrap path. In the current deployment Remotely Save is used only to deliver:
+If a mobile device does not have WebSync installed yet, it needs a bootstrap path. Use any one-time bootstrap method to deliver:
 
 - `.obsidian/community-plugins.json`
 - `.obsidian/plugins/websync/`
@@ -239,7 +239,7 @@ Recommended mobile flow:
 2. Enable WebSync.
 3. Let WebSync connect and pull updates.
 4. Fully quit and reopen Obsidian so the latest WebSync code is loaded.
-5. Keep the bootstrap tool disabled or pull-only to avoid double-sync conflicts.
+5. Keep any bootstrap tool disabled or pull-only to avoid double-sync conflicts.
 
 ## Empty Folder Sync
 

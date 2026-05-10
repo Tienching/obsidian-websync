@@ -1169,14 +1169,12 @@ function addParentFolders(path: string, folders: Set<string>): void {
 function isProtectedBootstrapPath(pathInput: string): boolean {
   const path = pathInput.toLowerCase();
   return path === ".obsidian/plugins/websync"
-    || path.startsWith(".obsidian/plugins/websync/")
-    || path === ".obsidian/plugins/remotely-save"
-    || path.startsWith(".obsidian/plugins/remotely-save/");
+    || path.startsWith(".obsidian/plugins/websync/");
 }
 
 function isProtectedBootstrapAncestor(pathInput: string): boolean {
   const path = pathInput.toLowerCase();
-  return ".obsidian/plugins/websync".startsWith(`${path}/`) || ".obsidian/plugins/remotely-save".startsWith(`${path}/`);
+  return ".obsidian/plugins/websync".startsWith(`${path}/`);
 }
 
 function isExcludedObsidianPath(path: string, options: SyncPathOptions): boolean {
