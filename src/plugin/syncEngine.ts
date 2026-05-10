@@ -197,6 +197,10 @@ export class SyncEngine {
 
   private handleLocalDelete(file: TAbstractFile): void {
     if (file instanceof TFolder) {
+      const path = safePath(file.path);
+      if (path && this.isSuppressed(path)) {
+        return;
+      }
       this.scheduleFolderManifestUpdate();
       return;
     }
@@ -331,7 +335,7 @@ export class SyncEngine {
             await this.requestPull(path);
           }
         }
-        await this.ensureDeclaredFolders();
+        await this.ensureDeclaredFolders({ pruneUndeclared: true });
       }
     } finally {
       this.replacingLocalFromRemote = false;
@@ -568,7 +572,7 @@ export class SyncEngine {
     await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
     this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
     if (message.entry.path === FOLDER_MANIFEST_PATH) {
-      await this.ensureDeclaredFolders();
+      await this.ensureDeclaredFolders({ pruneUndeclared: true });
     }
     await this.options.save();
   }
@@ -582,7 +586,7 @@ export class SyncEngine {
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
       if (message.entry.path === FOLDER_MANIFEST_PATH) {
-        await this.ensureDeclaredFolders();
+        await this.ensureDeclaredFolders({ pruneUndeclared: true });
       }
       await this.options.save();
     } else if (message.status === "deleted") {
@@ -617,12 +621,12 @@ export class SyncEngine {
     await this.writeRemoteFile(draft.entry.path, content);
     this.options.getState().knownFiles[draft.entry.path] = knownFromEntry(draft.entry);
     if (draft.entry.path === FOLDER_MANIFEST_PATH) {
-      await this.ensureDeclaredFolders();
+      await this.ensureDeclaredFolders({ pruneUndeclared: true });
     }
     await this.options.save();
   }
 
-  private async ensureDeclaredFolders(): Promise<void> {
+  private async ensureDeclaredFolders(options: { pruneUndeclared?: boolean } = {}): Promise<void> {
     const adapter = this.options.app.vault.adapter;
     if (!(await adapter.exists(FOLDER_MANIFEST_PATH))) {
       return;
@@ -647,6 +651,64 @@ export class SyncEngine {
 
     for (const folder of paths) {
       await ensureFolder(this.options.app, folder);
+    }
+    if (options.pruneUndeclared && !this.hasPendingFolderManifestPut()) {
+      await this.pruneUndeclaredEmptyFolders("", new Set(paths));
+    }
+  }
+
+  private async pruneUndeclaredEmptyFolders(folder: string, declaredFolders: Set<string>): Promise<void> {
+    const adapter = this.options.app.vault.adapter;
+    let listed: { files: string[]; folders: string[] };
+    try {
+      listed = await adapter.list(folder);
+    } catch {
+      return;
+    }
+
+    for (const childInput of listed.folders) {
+      const child = safePath(childInput);
+      if (!child || !isFolderManifestCandidate(child)) {
+        continue;
+      }
+      await this.pruneUndeclaredEmptyFolders(child, declaredFolders);
+    }
+
+    if (!folder || declaredFolders.has(folder) || !isFolderManifestCandidate(folder)) {
+      return;
+    }
+
+    let after: { files: string[]; folders: string[] };
+    try {
+      after = await adapter.list(folder);
+    } catch {
+      return;
+    }
+    for (const fileInput of after.files) {
+      const file = safePath(fileInput);
+      if (file && isIgnorableEmptyFolderFile(file)) {
+        try {
+          this.suppress(file);
+          await adapter.remove(file);
+        } catch {
+          // Best effort cleanup. A remaining file means the folder is not empty.
+        }
+      }
+    }
+
+    try {
+      after = await adapter.list(folder);
+    } catch {
+      return;
+    }
+    if (after.files.length > 0 || after.folders.length > 0) {
+      return;
+    }
+    try {
+      this.suppress(folder);
+      await adapter.rmdir(folder, false);
+    } catch {
+      return;
     }
   }
 
@@ -847,6 +909,12 @@ export class SyncEngine {
     state.pendingOps = state.pendingOps.filter((op) => op.opId !== opId);
   }
 
+  private hasPendingFolderManifestPut(): boolean {
+    const state = this.options.getState();
+    return state.pendingOps.some((op) => op.type === "put" && op.path === FOLDER_MANIFEST_PATH)
+      || [...this.inflight.values()].some((op) => op.type === "put" && op.path === FOLDER_MANIFEST_PATH);
+  }
+
   private scheduleReconnect(): void {
     if (!this.started || this.reconnectTimer) {
       return;
@@ -975,6 +1043,11 @@ function isFolderManifestCandidate(pathInput: string): boolean {
     && !path.startsWith(".obsidian/")
     && path !== ".trash"
     && !path.startsWith(".trash/");
+}
+
+function isIgnorableEmptyFolderFile(pathInput: string): boolean {
+  const path = pathInput.toLowerCase();
+  return path === ".ds_store" || path.endsWith("/.ds_store") || path === "thumbs.db" || path.endsWith("/thumbs.db");
 }
 
 async function sleep(ms: number): Promise<void> {

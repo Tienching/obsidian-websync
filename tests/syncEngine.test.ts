@@ -482,6 +482,67 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("哈哈")).toBe(true);
   });
 
+  it("removes local empty folders omitted by a realtime folder manifest", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({
+      "Keep 有内容/note.md": Buffer.from("local content"),
+      "Local Non Empty/note.md": Buffer.from("local content"),
+      "Junk Only/.DS_Store": Buffer.from("finder")
+    });
+    adapter.folders.add("Deleted Empty");
+    adapter.folders.add("Deleted Parent");
+    adapter.folders.add("Deleted Parent/Deleted Child");
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    const content = Buffer.from(JSON.stringify({
+      version: 1,
+      folders: ["Keep 有内容"]
+    }));
+
+    await (
+      engine as unknown as {
+        applyRemoteChange(message: {
+          type: "remote-change";
+          action: "put";
+          originDeviceId: string;
+          entry: ReturnType<typeof entry>;
+          contentBase64: string;
+        }): Promise<void>;
+      }
+    ).applyRemoteChange({
+      type: "remote-change",
+      action: "put",
+      originDeviceId: "phone",
+      entry: entry(".obsidian/websync-folders.json"),
+      contentBase64: content.toString("base64")
+    });
+
+    expect(await adapter.exists("Deleted Empty")).toBe(false);
+    expect(await adapter.exists("Deleted Parent")).toBe(false);
+    expect(await adapter.exists("Deleted Parent/Deleted Child")).toBe(false);
+    expect(await adapter.exists("Junk Only")).toBe(false);
+    expect(await adapter.exists("Junk Only/.DS_Store")).toBe(false);
+    expect(await adapter.exists("Local Non Empty")).toBe(true);
+    expect(await adapter.exists("Local Non Empty/note.md")).toBe(true);
+    expect(await adapter.exists("Keep 有内容")).toBe(true);
+    expect(await adapter.exists("Keep 有内容/note.md")).toBe(true);
+  });
+
   it("writes and queues the folder manifest for local empty folders", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({});
