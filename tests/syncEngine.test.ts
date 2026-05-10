@@ -622,6 +622,84 @@ describe("SyncEngine helpers", () => {
     });
   });
 
+  it("merges stale markdown acks and retries the merged file", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const baseContent = Buffer.from("# Note\nold title\nold body\n");
+    const localContent = Buffer.from("# Note\nphone title\nold body\n");
+    const remoteContent = Buffer.from("# Note\nold title\nmac body\n");
+    const adapter = new FakeAdapter({
+      "Wiki 知识网络/note.md": localContent
+    });
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        "Wiki 知识网络/note.md": {
+          hash: sha256Hex(baseContent),
+          revision: 1,
+          contentBase64: baseContent.toString("base64")
+        } as LocalSyncState["knownFiles"][string]
+      },
+      pendingOps: [{
+        opId: "note-op",
+        type: "put",
+        path: "Wiki 知识网络/note.md",
+        baseRevision: 1,
+        createdAt: 1,
+        baseContentBase64: baseContent.toString("base64")
+      } as LocalSyncState["pendingOps"][number]]
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (
+      engine as unknown as {
+        inflight: Map<string, unknown>;
+      }
+    ).inflight.set("note-op", {
+      ...state.pendingOps[0],
+      contentBase64: localContent.toString("base64")
+    });
+
+    await (
+      engine as unknown as {
+        handleAck(message: unknown): Promise<void>;
+      }
+    ).handleAck({
+      type: "ack",
+      opId: "note-op",
+      status: "stale",
+      entry: {
+        ...entry("Wiki 知识网络/note.md"),
+        hash: sha256Hex(remoteContent),
+        revision: 2
+      },
+      canonicalContentBase64: remoteContent.toString("base64")
+    });
+
+    expect(adapter.readUtf8("Wiki 知识网络/note.md")).toBe("# Note\nphone title\nmac body\n");
+    expect([...adapter.files.keys()].filter((path) => path.includes("conflict"))).toEqual([]);
+    expect(state.pendingOps).toHaveLength(1);
+    expect(state.pendingOps[0]).toMatchObject({
+      type: "put",
+      path: "Wiki 知识网络/note.md",
+      baseRevision: 2,
+      baseContentBase64: remoteContent.toString("base64")
+    });
+  });
+
   it("writes and queues the folder manifest for local empty folders", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({});
@@ -715,6 +793,64 @@ describe("SyncEngine helpers", () => {
 
     expect(resolved).toBe(true);
     expect(state.pendingOps).toEqual([]);
+  });
+
+  it("reports queue and sync state diagnostics", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("hello") });
+    const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (engine as unknown as { socket: typeof socket }).socket = socket;
+
+    (engine as unknown as { queuePut(path: string): void }).queuePut("note.md");
+    expect(engine.getStatusSnapshot()).toMatchObject({
+      status: "sync idle",
+      pendingOps: 1,
+      inflightOps: 0,
+      queuedPaths: ["note.md"]
+    });
+
+    await (engine as unknown as { flushQueue(): Promise<void> }).flushQueue();
+    const inflight = engine.getStatusSnapshot();
+    expect(inflight).toMatchObject({
+      pendingOps: 1,
+      inflightOps: 1,
+      inflightPaths: ["note.md"]
+    });
+
+    const op = state.pendingOps[0];
+    await (
+      engine as unknown as {
+        handleServerMessage(message: unknown): Promise<void>;
+      }
+    ).handleServerMessage({
+      type: "ack",
+      opId: op.opId,
+      status: "accepted",
+      entry: entry("note.md")
+    });
+
+    expect(engine.getStatusSnapshot()).toMatchObject({
+      pendingOps: 0,
+      inflightOps: 0,
+      lastSyncedAt: expect.any(String)
+    });
   });
 });
 

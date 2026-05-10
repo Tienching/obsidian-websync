@@ -6,12 +6,14 @@ export interface PendingOperation {
   path: string;
   baseRevision: number;
   createdAt: number;
+  baseContentBase64?: string;
   folderManifestBaseFolders?: string[];
 }
 
 export interface KnownFileState {
   hash: string;
   revision: number;
+  contentBase64?: string;
   deleted?: boolean;
 }
 

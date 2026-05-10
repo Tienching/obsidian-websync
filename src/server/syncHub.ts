@@ -102,6 +102,10 @@ export class SyncHub {
       );
       return;
     }
+    if (url.pathname === "/oplog") {
+      void this.handleHttpOperationLog(req, res, url);
+      return;
+    }
     if (url.pathname === "/file") {
       void this.handleHttpFile(req, res, url);
       return;
@@ -116,6 +120,21 @@ export class SyncHub {
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
+  }
+
+  private async handleHttpOperationLog(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (!this.isHttpAuthorized(req, url)) {
+      this.unauthorized(res);
+      return;
+    }
+    const after = Math.max(0, Number(url.searchParams.get("after") ?? "0"));
+    const limit = Math.min(Math.max(1, Number(url.searchParams.get("limit") ?? "100")), 500);
+    const entries = await this.options.manifestStore.readOperationLog(after, limit);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      entries,
+      nextAfter: entries.at(-1)?.revision ?? after
+    }));
   }
 
   private async handleHttpFileChunk(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {

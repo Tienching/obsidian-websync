@@ -17,6 +17,20 @@ export interface ManifestSnapshot {
   files: Record<string, ManifestFileEntry>;
 }
 
+export type OperationLogAction = "put" | "delete" | "conflict";
+
+export interface OperationLogEntry {
+  revision: number;
+  action: OperationLogAction;
+  path: string;
+  deviceId: string;
+  deviceName: string;
+  timestamp: string;
+  hash?: string;
+  size?: number;
+  canonicalPath?: string;
+}
+
 export interface HelloMessage {
   type: "hello";
   protocolVersion: number;

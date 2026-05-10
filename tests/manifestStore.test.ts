@@ -40,7 +40,80 @@ describe("ManifestStore", () => {
     expect(store.snapshot().revision).toBe(1);
   });
 
-  it("turns stale concurrent put into a conflict file", async () => {
+  it("records accepted puts and deletes in an append-only operation log", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    const put = await store.applyPut({
+      opId: "op1",
+      path: "Memo/a.md",
+      content: Buffer.from("hello"),
+      hash: "hash-a",
+      size: 5,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1,
+      now: "2026-05-10T01:00:00.000Z"
+    });
+    if (put.kind !== "accepted") {
+      throw new Error("expected accepted put");
+    }
+    await store.applyDelete({
+      opId: "op2",
+      path: "Memo/a.md",
+      baseRevision: put.entry.revision,
+      deviceId: "iphone",
+      deviceName: "iPhone",
+      now: "2026-05-10T01:00:01.000Z"
+    });
+
+    await expect(store.readOperationLog()).resolves.toMatchObject([
+      { revision: 1, action: "put", path: "Memo/a.md", deviceId: "mac", deviceName: "MacBook" },
+      { revision: 2, action: "delete", path: "Memo/a.md", deviceId: "iphone", deviceName: "iPhone" }
+    ]);
+    await expect(store.readOperationLog(1)).resolves.toMatchObject([
+      { revision: 2, action: "delete", path: "Memo/a.md" }
+    ]);
+  });
+
+  it("turns stale concurrent binary put into a conflict file", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    await store.applyPut({
+      opId: "op1",
+      path: "WIKI/a.bin",
+      content: Buffer.from("remote"),
+      hash: "hash-remote",
+      size: 6,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+
+    const result = await store.applyPut({
+      opId: "op2",
+      path: "WIKI/a.bin",
+      content: Buffer.from("phone"),
+      hash: "hash-phone",
+      size: 5,
+      baseRevision: 0,
+      deviceId: "iphone",
+      deviceName: "iPhone",
+      mtime: 2,
+      now: "2026-05-09T14:30:01.000Z"
+    });
+
+    expect(result.kind).toBe("conflict");
+    if (result.kind !== "conflict") {
+      throw new Error("expected conflict put");
+    }
+    expect(result.entry.path).toBe("WIKI/a (conflict from iPhone 20260509-143001).bin");
+    expect(store.snapshot().files["WIKI/a.bin"].hash).toBe("hash-remote");
+    expect(store.snapshot().files["WIKI/a (conflict from iPhone 20260509-143001).bin"].hash).toBe("hash-phone");
+  });
+
+  it("returns stale instead of creating conflict copies for concurrent markdown puts", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     await store.applyPut({
@@ -68,13 +141,9 @@ describe("ManifestStore", () => {
       now: "2026-05-09T14:30:01.000Z"
     });
 
-    expect(result.kind).toBe("conflict");
-    if (result.kind !== "conflict") {
-      throw new Error("expected conflict put");
-    }
-    expect(result.entry.path).toBe("WIKI/a (conflict from iPhone 20260509-143001).md");
+    expect(result.kind).toBe("stale");
+    expect(Object.keys(store.snapshot().files)).toEqual(["WIKI/a.md"]);
     expect(store.snapshot().files["WIKI/a.md"].hash).toBe("hash-remote");
-    expect(store.snapshot().files["WIKI/a (conflict from iPhone 20260509-143001).md"].hash).toBe("hash-phone");
   });
 
   it("returns stale instead of creating conflict copies for concurrent folder manifests", async () => {
@@ -210,13 +279,13 @@ describe("ManifestStore", () => {
     expect(store.snapshot().files[".obsidian/plugins/dataview/data.json"]).toBeUndefined();
   });
 
-  it("serializes concurrent puts so stale bases become conflict files", async () => {
+  it("serializes concurrent binary puts so stale bases become conflict files", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 
     const [first, second] = await Promise.all([
       store.applyPut({
         opId: "op1",
-        path: "WIKI/race.md",
+        path: "WIKI/race.bin",
         content: Buffer.from("first"),
         hash: "hash-first",
         size: 5,
@@ -228,7 +297,7 @@ describe("ManifestStore", () => {
       }),
       store.applyPut({
         opId: "op2",
-        path: "WIKI/race.md",
+        path: "WIKI/race.bin",
         content: Buffer.from("second"),
         hash: "hash-second",
         size: 6,
@@ -243,7 +312,7 @@ describe("ManifestStore", () => {
     const kinds = [first.kind, second.kind].sort();
     expect(kinds).toEqual(["accepted", "conflict"]);
     expect(Object.keys(store.snapshot().files)).toHaveLength(2);
-    expect(store.snapshot().files["WIKI/race.md"]).toBeDefined();
+    expect(store.snapshot().files["WIKI/race.bin"]).toBeDefined();
   });
 
   it("reopens a persisted local manifest", async () => {

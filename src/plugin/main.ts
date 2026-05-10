@@ -1,6 +1,6 @@
 import { Notice, Plugin } from "obsidian";
 import { loadLocalState, LocalSyncState, saveLocalState } from "./localState";
-import { ForceScanOptions, SyncEngine } from "./syncEngine";
+import { ForceScanOptions, SyncEngine, SyncStatusSnapshot } from "./syncEngine";
 import { createDefaultData, SyncPluginData, WebSyncSettingTab } from "./settings";
 
 export default class WebSyncPlugin extends Plugin {
@@ -41,6 +41,17 @@ export default class WebSyncPlugin extends Plugin {
       name: "Force local scan",
       callback: () => void runManualForceScan(this.engine)
     });
+    this.addCommand({
+      id: "show-diagnostics",
+      name: "Show sync diagnostics",
+      callback: () => {
+        if (!this.engine) {
+          new Notice("WebSync is not ready");
+          return;
+        }
+        new Notice(formatStatusSnapshot(this.engine.getStatusSnapshot()), 12_000);
+      }
+    });
 
     this.engine.start();
   }
@@ -77,6 +88,29 @@ export async function runManualForceScan(engine: ManualForceScanEngine | undefin
   } catch (error) {
     new Notice(`WebSync sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function formatStatusSnapshot(snapshot: SyncStatusSnapshot): string {
+  const lines = [
+    `WebSync: ${snapshot.status}`,
+    `Queue: ${snapshot.pendingOps} pending, ${snapshot.inflightOps} inflight`
+  ];
+  if (snapshot.remoteRevision !== undefined) {
+    lines.push(`Remote revision: ${snapshot.remoteRevision}`);
+  }
+  if (snapshot.lastSyncedAt) {
+    lines.push(`Last synced: ${snapshot.lastSyncedAt}`);
+  }
+  if (snapshot.lastError) {
+    lines.push(`Last error: ${snapshot.lastError}`);
+  }
+  if (snapshot.queuedPaths.length > 0) {
+    lines.push(`Queued: ${snapshot.queuedPaths.slice(0, 3).join(", ")}`);
+  }
+  if (snapshot.inflightPaths.length > 0) {
+    lines.push(`Inflight: ${snapshot.inflightPaths.slice(0, 3).join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 function mergeData(defaults: SyncPluginData, loaded: Partial<SyncPluginData> | null): SyncPluginData {

@@ -11,8 +11,10 @@ import {
   ServerMessage
 } from "../shared/protocol";
 import { isSyncablePath, normalizeVaultPath, SyncPathOptions, toConflictPath } from "../shared/pathRules";
+import { debounceMsForChange } from "./debouncePolicy";
 import { resolveDeviceName } from "./deviceName";
 import { createOpId, knownFromEntry, LocalSyncState, PendingOperation } from "./localState";
+import { mergeMarkdown } from "./markdownMerge";
 import { SyncPluginSettings } from "./settings";
 
 interface EngineOptions {
@@ -31,12 +33,24 @@ interface InflightOperation extends PendingOperation {
 
 interface QueuePutOptions {
   baseRevision?: number;
+  baseContentBase64?: string;
   folderManifestBaseFolders?: string[];
 }
 
 export interface ForceScanOptions {
   waitForIdle?: boolean;
   idleTimeoutMs?: number;
+}
+
+export interface SyncStatusSnapshot {
+  status: string;
+  pendingOps: number;
+  inflightOps: number;
+  queuedPaths: string[];
+  inflightPaths: string[];
+  remoteRevision?: number;
+  lastSyncedAt?: string;
+  lastError?: string;
 }
 
 const FOLDER_MANIFEST_PATH = ".obsidian/websync-folders.json";
@@ -53,6 +67,9 @@ export class SyncEngine {
   private remoteManifest?: ManifestSnapshot;
   private replacingLocalFromRemote = false;
   private started = false;
+  private status = "sync idle";
+  private lastSyncedAt?: string;
+  private lastError?: string;
 
   constructor(private readonly options: EngineOptions) {}
 
@@ -61,7 +78,7 @@ export class SyncEngine {
       return;
     }
     this.started = true;
-    this.options.setStatus("sync idle");
+    this.setStatus("sync idle");
     this.registerVaultEvents();
     if (this.options.getSettings().autoConnect) {
       this.connect();
@@ -84,20 +101,20 @@ export class SyncEngine {
     this.debounceTimers.clear();
     this.socket?.close();
     this.socket = undefined;
-    this.options.setStatus("sync stopped");
+    this.setStatus("sync stopped");
   }
 
   connect(): void {
     const settings = this.options.getSettings();
     if (!settings.serverUrl || !settings.token) {
-      this.options.setStatus("sync needs token");
+      this.setStatus("sync needs token");
       return;
     }
 
     this.socket?.close();
     const socket = new WebSocket(settings.serverUrl);
     this.socket = socket;
-    this.options.setStatus("sync connecting");
+    this.setStatus("sync connecting");
 
     socket.onopen = () => {
       const deviceName = this.getDeviceName();
@@ -111,7 +128,7 @@ export class SyncEngine {
           token: settings.token
         })
       );
-      this.options.setStatus("sync connected");
+      this.setStatus("sync connected");
       void this.flushQueue();
     };
 
@@ -125,13 +142,13 @@ export class SyncEngine {
     socket.onclose = () => {
       if (this.socket === socket) {
         this.inflight.clear();
-        this.options.setStatus("sync offline");
+        this.setStatus("sync offline");
         this.scheduleReconnect();
       }
     };
 
     socket.onerror = () => {
-      this.options.setStatus("sync error");
+      this.setStatus("sync error", "socket error");
     };
   }
 
@@ -142,6 +159,20 @@ export class SyncEngine {
     if (options.waitForIdle) {
       await this.waitForSyncIdle(options.idleTimeoutMs ?? 30_000);
     }
+  }
+
+  getStatusSnapshot(): SyncStatusSnapshot {
+    const state = this.options.getState();
+    return {
+      status: this.status,
+      pendingOps: state.pendingOps.length,
+      inflightOps: this.inflight.size,
+      queuedPaths: state.pendingOps.map((op) => op.path),
+      inflightPaths: [...this.inflight.values()].map((op) => op.path),
+      remoteRevision: this.remoteManifest?.revision,
+      lastSyncedAt: this.lastSyncedAt,
+      lastError: this.lastError
+    };
   }
 
   private registerVaultEvents(): void {
@@ -181,7 +212,7 @@ export class SyncEngine {
     this.folderManifestTimer = window.setTimeout(() => {
       this.folderManifestTimer = undefined;
       void this.refreshFolderManifest().then(() => this.flushQueue());
-    }, 900);
+    }, debounceMsForChange({ kind: "folder", path: FOLDER_MANIFEST_PATH }));
   }
 
   private schedulePut(pathInput: string): void {
@@ -197,7 +228,7 @@ export class SyncEngine {
       this.debounceTimers.delete(path);
       this.queuePut(path);
       void this.flushQueue();
-    }, 900);
+    }, debounceMsForChange({ kind: "file", path }));
     this.debounceTimers.set(path, timer);
   }
 
@@ -229,6 +260,12 @@ export class SyncEngine {
     const existing = state.pendingOps.find((op) => op.type === "put" && op.path === path);
     const baseRevision = options.baseRevision ?? existing?.baseRevision ?? state.knownFiles[path]?.revision ?? this.remoteManifest?.files[path]?.revision ?? 0;
     const op: PendingOperation = { opId: createOpId(state.deviceId), type: "put", path, baseRevision, createdAt: Date.now() };
+    const baseContentBase64 = isMergeableTextPath(path)
+      ? options.baseContentBase64 ?? existing?.baseContentBase64 ?? state.knownFiles[path]?.contentBase64
+      : undefined;
+    if (baseContentBase64) {
+      op.baseContentBase64 = baseContentBase64;
+    }
     const folderManifestBaseFolders = path === FOLDER_MANIFEST_PATH
       ? options.folderManifestBaseFolders ?? existing?.folderManifestBaseFolders
       : undefined;
@@ -310,7 +347,7 @@ export class SyncEngine {
     }
     if (message.type === "error") {
       new Notice(`Sync service: ${message.message}`);
-      this.options.setStatus(`sync error: ${message.code}`);
+      this.setStatus(`sync error: ${message.code}`, message.message);
     }
   }
 
@@ -321,7 +358,7 @@ export class SyncEngine {
 
     if (replaceLocalOnStart) {
       this.replacingLocalFromRemote = true;
-      this.options.setStatus("sync replacing local");
+      this.setStatus("sync replacing local");
       await this.replaceLocalWithRemoteManifest(manifest);
       settings.replaceLocalOnStart = false;
       await this.options.save();
@@ -523,7 +560,10 @@ export class SyncEngine {
     const hash = await sha256Hex(content);
     const contentBase64 = arrayBufferToBase64(content);
     const mtime = Date.now();
-    this.inflight.set(op.opId, { ...op, contentBase64 });
+    const baseContentBase64 = isMergeableTextPath(op.path)
+      ? op.baseContentBase64 ?? this.options.getState().knownFiles[op.path]?.contentBase64
+      : undefined;
+    this.inflight.set(op.opId, { ...op, baseContentBase64, contentBase64 });
     this.send({
       type: "put",
       opId: op.opId,
@@ -552,21 +592,29 @@ export class SyncEngine {
     this.removePending(message.opId);
 
     if (message.status === "accepted" && message.entry) {
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.rememberKnownFile(message.entry, op?.contentBase64);
+      this.markSynced();
     } else if (message.status === "deleted" && message.entry) {
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.rememberKnownFile(message.entry);
+      this.markSynced();
     } else if (op && isFolderManifestRetryAck(message, op)) {
       const canonicalEntry = message.status === "conflict" ? message.canonicalEntry : message.entry;
       if (canonicalEntry) {
         await this.mergeAndRetryFolderManifest(op, canonicalEntry, message.canonicalContentBase64);
       }
+    } else if (op && isMarkdownRetryAck(message, op)) {
+      const canonicalEntry = message.status === "conflict" ? message.canonicalEntry : message.entry;
+      if (canonicalEntry) {
+        await this.mergeAndRetryMarkdown(op, canonicalEntry, message.canonicalContentBase64);
+      }
     } else if (message.status === "conflict" && op?.contentBase64 && message.entry && message.canonicalEntry) {
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(op.contentBase64));
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.rememberKnownFile(message.entry, op.contentBase64);
       if (message.canonicalContentBase64) {
         await this.writeRemoteFile(message.canonicalEntry.path, base64ToArrayBuffer(message.canonicalContentBase64));
-        this.options.getState().knownFiles[message.canonicalEntry.path] = knownFromEntry(message.canonicalEntry);
+        this.rememberKnownFile(message.canonicalEntry, message.canonicalContentBase64);
       }
+      this.markSynced();
       new Notice(`Sync conflict saved: ${message.entry.path}`);
     } else if (message.status === "stale" && message.entry && !message.entry.deleted) {
       await this.requestPull(message.entry.path);
@@ -599,6 +647,38 @@ export class SyncEngine {
     await this.flushQueue();
   }
 
+  private async mergeAndRetryMarkdown(op: InflightOperation, canonicalEntry: ManifestFileEntry, canonicalContentBase64?: string): Promise<void> {
+    if (!op.contentBase64 || !op.baseContentBase64 || !canonicalContentBase64) {
+      await this.requestPull(op.path);
+      return;
+    }
+
+    const base = arrayBufferToText(base64ToArrayBuffer(op.baseContentBase64));
+    const local = arrayBufferToText(base64ToArrayBuffer(op.contentBase64));
+    const remote = arrayBufferToText(base64ToArrayBuffer(canonicalContentBase64));
+    const result = mergeMarkdown(base, local, remote);
+
+    this.rememberKnownFile(canonicalEntry, canonicalContentBase64);
+    if (result.conflicted) {
+      const conflictPath = toConflictPath(op.path, this.getDeviceName(), new Date().toISOString());
+      await this.writeRemoteFile(conflictPath, textToArrayBuffer(result.merged));
+      this.queuePut(conflictPath);
+      await this.writeRemoteFile(op.path, base64ToArrayBuffer(canonicalContentBase64));
+      this.markSynced();
+      await this.flushQueue();
+      new Notice(`Sync conflict saved: ${conflictPath}`);
+      return;
+    }
+
+    const mergedContent = textToArrayBuffer(result.merged);
+    await this.writeRemoteFile(op.path, mergedContent);
+    this.queuePut(op.path, {
+      baseRevision: canonicalEntry.revision,
+      baseContentBase64: canonicalContentBase64
+    });
+    await this.flushQueue();
+  }
+
   private async applyRemoteChange(message: RemoteChangeMessage): Promise<void> {
     if (!this.canApplyRemote() || !this.isSyncablePath(message.entry.path)) {
       return;
@@ -606,6 +686,7 @@ export class SyncEngine {
     if (message.action === "delete") {
       await this.deleteRemoteFile(message.entry.path);
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.markSynced();
       await this.options.save();
       return;
     }
@@ -616,10 +697,11 @@ export class SyncEngine {
 
     await this.preserveLocalConflictIfNeeded(message.entry.path, message.entry.hash);
     await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
-    this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+    this.rememberKnownFile(message.entry, message.contentBase64);
     if (message.entry.path === FOLDER_MANIFEST_PATH) {
       await this.ensureDeclaredFolders({ pruneUndeclared: true });
     }
+    this.markSynced();
     await this.options.save();
   }
 
@@ -630,14 +712,16 @@ export class SyncEngine {
     if (message.status === "found" && message.contentBase64) {
       await this.preserveLocalConflictIfNeeded(message.entry.path, message.entry.hash);
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.rememberKnownFile(message.entry, message.contentBase64);
       if (message.entry.path === FOLDER_MANIFEST_PATH) {
         await this.ensureDeclaredFolders({ pruneUndeclared: true });
       }
+      this.markSynced();
       await this.options.save();
     } else if (message.status === "deleted") {
       await this.deleteRemoteFile(message.entry.path);
       this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.markSynced();
       await this.options.save();
     }
   }
@@ -665,10 +749,11 @@ export class SyncEngine {
     const content = base64ChunksToArrayBuffer(draft.chunks);
     await this.preserveLocalConflictIfNeeded(draft.entry.path, draft.entry.hash);
     await this.writeRemoteFile(draft.entry.path, content);
-    this.options.getState().knownFiles[draft.entry.path] = knownFromEntry(draft.entry);
+    this.rememberKnownFile(draft.entry, arrayBufferToBase64(content));
     if (draft.entry.path === FOLDER_MANIFEST_PATH) {
       await this.ensureDeclaredFolders({ pruneUndeclared: true });
     }
+    this.markSynced();
     await this.options.save();
   }
 
@@ -815,7 +900,8 @@ export class SyncEngine {
       const content = await this.fetchRemoteFile(path);
       await this.preserveLocalConflictIfNeeded(entry.path, entry.hash);
       await this.writeRemoteFile(entry.path, content);
-      this.options.getState().knownFiles[entry.path] = knownFromEntry(entry);
+      this.rememberKnownFile(entry, arrayBufferToBase64(content));
+      this.markSynced();
       await this.options.save();
       return;
     }
@@ -999,6 +1085,27 @@ export class SyncEngine {
     }
     return true;
   }
+
+  private rememberKnownFile(entry: ManifestFileEntry, contentBase64?: string): void {
+    const known = knownFromEntry(entry);
+    if (!entry.deleted && contentBase64 && isMergeableTextPath(entry.path)) {
+      known.contentBase64 = contentBase64;
+    }
+    this.options.getState().knownFiles[entry.path] = known;
+  }
+
+  private markSynced(): void {
+    this.lastSyncedAt = new Date().toISOString();
+    this.lastError = undefined;
+  }
+
+  private setStatus(status: string, error?: string): void {
+    this.status = status;
+    if (error) {
+      this.lastError = error;
+    }
+    this.options.setStatus(status);
+  }
 }
 
 async function ensureParentFolder(app: App, path: string): Promise<void> {
@@ -1099,6 +1206,20 @@ function isFolderManifestRetryAck(message: AckMessage, op: InflightOperation): b
     && Boolean(op.contentBase64)
     && Boolean(message.canonicalContentBase64)
     && (message.status === "stale" || message.status === "conflict");
+}
+
+function isMarkdownRetryAck(message: AckMessage, op: InflightOperation): boolean {
+  return isMergeableTextPath(op.path)
+    && op.path !== FOLDER_MANIFEST_PATH
+    && Boolean(op.contentBase64)
+    && Boolean(op.baseContentBase64)
+    && Boolean(message.canonicalContentBase64)
+    && (message.status === "stale" || message.status === "conflict");
+}
+
+function isMergeableTextPath(pathInput: string): boolean {
+  const path = pathInput.toLowerCase();
+  return path.endsWith(".md") || path.endsWith(".markdown");
 }
 
 function formatFolderManifest(folders: string[]): string {

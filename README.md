@@ -11,7 +11,8 @@ Obsidian plugin
   - Watches vault file changes.
   - Sends local changes over WebSocket.
   - Pulls remote changes and writes them to the vault.
-  - Keeps an offline queue and conflict copies.
+  - Keeps an offline queue, adaptive debounce policy, and conflict copies.
+  - Merges non-overlapping Markdown edits with a three-way merge.
   - Syncs WebSync's own plugin files after bootstrap.
 
 Node sync service
@@ -19,6 +20,7 @@ Node sync service
   - Maintains revisioned manifest state.
   - Broadcasts realtime changes over WebSocket.
   - Serves chunked manifest/file HTTP endpoints.
+  - Keeps an append-only operation log for diagnostics.
   - Writes files and manifest snapshots to COS.
 
 Tencent COS
@@ -47,10 +49,14 @@ Generated build output goes to `dist/` and is ignored by git.
 - Startup sync scans local files and reconciles with the remote manifest.
 - Offline local changes are queued.
 - Remote changes are pulled and written locally.
+- Folder changes, Markdown edits, plugin resources, and binary files use different debounce delays.
 - Sync direction is configurable per device: two-way, pull-only, or push-only.
-- Conflicts are preserved as `(... conflict from DEVICE TIMESTAMP)` files.
+- Non-overlapping Markdown conflicts are merged client-side and retried automatically.
+- Overlapping Markdown conflicts and binary conflicts are preserved as `(... conflict from DEVICE TIMESTAMP)` files.
 - Conflict device names are resolved automatically from the local host/platform; they are not user-configured plugin settings.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
+- The command palette has `WebSync: Show sync diagnostics` for queue, inflight, revision, last sync, and last error state.
+- The service exposes an authorized `GET /oplog?after=REV&limit=N` endpoint for recent operation diagnostics.
 - Snapshot tombstones delete local files and prune empty parent folders.
 - `.obsidian` sync defaults to a narrow minimal set:
   - synced: `.obsidian/community-plugins.json`
@@ -181,6 +187,16 @@ https://your-domain/healthz
 wss://your-domain/sync
 ```
 
+Useful authenticated HTTP endpoints:
+
+```text
+GET /manifest-page?offset=0&limit=50
+GET /file-chunk?path=Memo%2Fa.md&offset=0&length=32768
+GET /oplog?after=0&limit=100
+```
+
+All non-health endpoints require `Authorization: Bearer <OBS_SYNC_TOKEN>`.
+
 ## Seed Remote State
 
 Seed through the live sync service:
@@ -258,7 +274,10 @@ Current test coverage includes:
 
 - path normalization and sync exclusions
 - manifest store put/delete/conflict behavior
+- operation log behavior
 - sync hub protocol behavior
+- adaptive debounce behavior
+- Markdown three-way merge behavior
 - plugin conflict preservation
 - remote tombstone deletion
 - empty parent-folder pruning

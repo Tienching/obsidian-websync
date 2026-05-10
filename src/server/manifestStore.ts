@@ -1,7 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { ManifestFileEntry, ManifestSnapshot } from "../shared/protocol";
+import { ManifestFileEntry, ManifestSnapshot, OperationLogEntry } from "../shared/protocol";
 import { isSyncablePath, normalizeVaultPath, toConflictPath } from "../shared/pathRules";
 import { FileStore } from "./fileStore";
 
@@ -49,6 +49,7 @@ export type DeleteResult =
 
 export class ManifestStore {
   private readonly manifestPath: string;
+  private readonly operationLogPath: string;
   private mutationQueue = Promise.resolve();
 
   private constructor(
@@ -56,6 +57,7 @@ export class ManifestStore {
     private manifest: ManifestSnapshot
   ) {
     this.manifestPath = join(options.dataDir, "manifest.json");
+    this.operationLogPath = join(options.dataDir, "oplog.jsonl");
   }
 
   static async open(options: StoreOptions): Promise<ManifestStore> {
@@ -94,6 +96,23 @@ export class ManifestStore {
     return this.withMutationLock(() => this.applyDeleteLocked(op));
   }
 
+  async readOperationLog(afterRevision = 0, limit = 100): Promise<OperationLogEntry[]> {
+    const max = Math.min(Math.max(Math.trunc(limit) || 100, 1), 500);
+    let body: string;
+    try {
+      body = await readFile(this.operationLogPath, "utf8");
+    } catch {
+      return [];
+    }
+    return body
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as OperationLogEntry)
+      .filter((entry) => entry.revision > afterRevision)
+      .sort((a, b) => a.revision - b.revision)
+      .slice(0, max);
+  }
+
   private async applyPutLocked(op: PutOperation): Promise<PutResult> {
     if (!isSyncablePath(op.path, SERVER_PATH_OPTIONS)) {
       return { kind: "ignored", message: "Path is excluded from sync" };
@@ -107,8 +126,8 @@ export class ManifestStore {
     }
 
     const hasStaleBase = current && !current.deleted && current.revision > op.baseRevision && current.updatedBy !== op.deviceId;
-    if (hasStaleBase && path === FOLDER_MANIFEST_PATH) {
-      return { kind: "stale", entry: current, message: "Folder manifest changed first" };
+    if (hasStaleBase && shouldReturnStaleForClientMerge(path)) {
+      return { kind: "stale", entry: current, message: "Remote file changed first" };
     }
     const targetPath = hasStaleBase ? toConflictPath(path, op.deviceName, op.now ?? new Date().toISOString()) : path;
 
@@ -123,6 +142,17 @@ export class ManifestStore {
     });
     this.manifest.files[targetPath] = entry;
     await this.persist();
+    await this.appendOperationLog({
+      revision: entry.revision,
+      action: hasStaleBase ? "conflict" : "put",
+      path: entry.path,
+      canonicalPath: hasStaleBase ? path : undefined,
+      deviceId: op.deviceId,
+      deviceName: op.deviceName,
+      timestamp: entry.updatedAt,
+      hash: entry.hash,
+      size: entry.size
+    });
 
     if (hasStaleBase) {
       return { kind: "conflict", entry, canonicalEntry: current };
@@ -156,6 +186,16 @@ export class ManifestStore {
     });
     this.manifest.files[path] = entry;
     await this.persist();
+    await this.appendOperationLog({
+      revision: entry.revision,
+      action: "delete",
+      path: entry.path,
+      deviceId: op.deviceId,
+      deviceName: op.deviceName,
+      timestamp: entry.updatedAt,
+      hash: entry.hash,
+      size: entry.size
+    });
     return { kind: "deleted", entry };
   }
 
@@ -197,4 +237,13 @@ export class ManifestStore {
     await rename(tmp, this.manifestPath);
     await this.options.fileStore.putManifest(body);
   }
+
+  private async appendOperationLog(entry: OperationLogEntry): Promise<void> {
+    await appendFile(this.operationLogPath, `${JSON.stringify(entry)}\n`);
+  }
+}
+
+function shouldReturnStaleForClientMerge(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower === FOLDER_MANIFEST_PATH || lower.endsWith(".md") || lower.endsWith(".markdown");
 }

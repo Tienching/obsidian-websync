@@ -31,6 +31,33 @@ describe("SyncHub", () => {
     await expect(bearer.json()).resolves.toMatchObject({ revision: 0, totalFiles: 0 });
   });
 
+  it("serves the operation log over authorized HTTP", async () => {
+    const { baseUrl, store } = await startHub();
+    await store.applyPut({
+      opId: "seed",
+      path: "Memo/a.md",
+      content: Buffer.from("hello"),
+      hash: "hash-a",
+      size: 5,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+
+    const response = await fetch(`${baseUrl}/oplog?after=0&limit=10`, {
+      headers: { Authorization: "Bearer secret" }
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      nextAfter: 1,
+      entries: [
+        { revision: 1, action: "put", path: "Memo/a.md", deviceName: "MacBook" }
+      ]
+    });
+  });
+
   it("rejects put payloads whose declared hash or size does not match bytes", async () => {
     const { store, wsUrl } = await startHub();
     const socket = await openAuthedSocket(wsUrl);
