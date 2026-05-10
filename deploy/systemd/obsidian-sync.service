@@ -1,0 +1,18 @@
+[Unit]
+Description=WebSync Obsidian Sync Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/obsidian-sync
+EnvironmentFile=/home/ubuntu/obsidian-sync/.env
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/env node /home/ubuntu/obsidian-sync/dist/server/index.cjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

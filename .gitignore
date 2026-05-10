@@ -1,0 +1,5 @@
+node_modules/
+.obsidian-sync-token
+.cos-seed-env
+.env
+dist/

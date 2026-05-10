@@ -1,0 +1,10 @@
+{
+  "id": "websync",
+  "name": "WebSync",
+  "version": "0.1.4",
+  "minAppVersion": "1.5.0",
+  "description": "Private realtime sync for Obsidian vaults.",
+  "author": "Jonaszchen",
+  "authorUrl": "https://chatgpt.com",
+  "isDesktopOnly": false
+}
