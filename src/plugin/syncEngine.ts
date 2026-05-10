@@ -567,6 +567,9 @@ export class SyncEngine {
     await this.preserveLocalConflictIfNeeded(message.entry.path, message.entry.hash);
     await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
     this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+    if (message.entry.path === FOLDER_MANIFEST_PATH) {
+      await this.ensureDeclaredFolders();
+    }
     await this.options.save();
   }
 

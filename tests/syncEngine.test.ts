@@ -435,6 +435,53 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("Memo 备忘记录/M1 生活记录/M1.1 日常记事")).toBe(true);
   });
 
+  it("creates folders when the folder manifest arrives as a realtime remote change", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    const content = Buffer.from(JSON.stringify({
+      version: 1,
+      folders: ["Untitled", "哈哈"]
+    }));
+
+    await (
+      engine as unknown as {
+        applyRemoteChange(message: {
+          type: "remote-change";
+          action: "put";
+          originDeviceId: string;
+          entry: ReturnType<typeof entry>;
+          contentBase64: string;
+        }): Promise<void>;
+      }
+    ).applyRemoteChange({
+      type: "remote-change",
+      action: "put",
+      originDeviceId: "phone",
+      entry: entry(".obsidian/websync-folders.json"),
+      contentBase64: content.toString("base64")
+    });
+
+    expect(await adapter.exists("Untitled")).toBe(true);
+    expect(await adapter.exists("哈哈")).toBe(true);
+  });
+
   it("writes and queues the folder manifest for local empty folders", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({});
