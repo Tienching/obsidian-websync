@@ -137,8 +137,8 @@ export class SyncEngine {
       this.handleLocalDelete(file);
     }));
     this.options.registerEvent(vault.on("rename", (file, oldPath) => {
-      this.queueDelete(oldPath);
       if (file instanceof TFile) {
+        this.queueDelete(oldPath);
         this.schedulePut(file.path);
       }
     }));
@@ -162,6 +162,9 @@ export class SyncEngine {
   }
 
   private handleLocalDelete(file: TAbstractFile): void {
+    if (!(file instanceof TFile)) {
+      return;
+    }
     const path = safePath(file.path);
     if (!path || !isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
       return;

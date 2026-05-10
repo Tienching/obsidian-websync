@@ -121,6 +121,23 @@ describe("ManifestStore", () => {
     expect(deleted.entry.deleted).toBe(true);
   });
 
+  it("ignores deletes for paths that are not in the remote manifest", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    await expect(
+      store.applyDelete({
+        opId: "op1",
+        path: "Wiki 知识网络/W1 索引地图",
+        baseRevision: 0,
+        deviceId: "mac",
+        deviceName: "MacBook"
+      })
+    ).resolves.toMatchObject({ kind: "ignored" });
+
+    expect(store.snapshot().revision).toBe(0);
+    expect(store.snapshot().files).toEqual({});
+  });
+
   it("serializes concurrent puts so stale bases become conflict files", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

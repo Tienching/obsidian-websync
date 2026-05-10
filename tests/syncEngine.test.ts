@@ -7,7 +7,9 @@ vi.mock("obsidian", () => ({
   Notice: class Notice {},
   normalizePath: (path: string) => path,
   requestUrl: vi.fn(),
-  TFile: class TFile {}
+  TFile: class TFile {
+    constructor(readonly path: string) {}
+  }
 }));
 
 describe("SyncEngine helpers", () => {
@@ -312,6 +314,44 @@ describe("SyncEngine helpers", () => {
       revision: 2,
       deleted: true
     });
+  });
+
+  it("ignores local folder delete events", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => ({
+        serverUrl: "ws://127.0.0.1/sync",
+        token: "secret",
+        vaultId: "vault",
+        deviceName: "iPhone",
+        autoConnect: false,
+        syncOnStart: false,
+        replaceLocalOnStart: false
+      }),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        handleLocalDelete(file: { path: string }): void;
+      }
+    ).handleLocalDelete({ path: "Wiki 知识网络/W1 索引地图" });
+
+    expect(state.pendingOps).toEqual([]);
   });
 
   it("creates folders declared by the folder manifest", async () => {

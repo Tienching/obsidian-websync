@@ -130,6 +130,9 @@ export class ManifestStore {
 
     const path = normalizeVaultPath(op.path);
     const current = this.manifest.files[path];
+    if (!current) {
+      return { kind: "ignored", message: "Path is not in the remote manifest" };
+    }
     if (current && !current.deleted && current.revision > op.baseRevision && current.updatedBy !== op.deviceId) {
       return { kind: "stale", entry: current, message: "Delete rejected because remote file changed first" };
     }
