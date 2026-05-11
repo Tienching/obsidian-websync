@@ -14,3 +14,15 @@ await build({
   sourcemap: false,
   logLevel: "info"
 });
+
+await build({
+  entryPoints: ["src/server/mirrorIndex.ts"],
+  outfile: "dist/server/mirror.cjs",
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  target: "node20",
+  packages: "external",
+  sourcemap: false,
+  logLevel: "info"
+});

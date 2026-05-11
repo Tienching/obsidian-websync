@@ -421,6 +421,47 @@ describe("SyncEngine helpers", () => {
     expect(state.pendingOps).toEqual([]);
   });
 
+  it("ignores delayed local file delete events for known remote tombstones", async () => {
+    const { TFile } = await import("obsidian");
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        "Wiki 知识网络/W1 索引地图/index.md": {
+          hash: "old",
+          revision: 10,
+          deleted: true
+        }
+      },
+      pendingOps: []
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        handleLocalDelete(file: InstanceType<typeof TFile>): void;
+      }
+    ).handleLocalDelete(new (TFile as any)("Wiki 知识网络/W1 索引地图/index.md") as InstanceType<typeof TFile>);
+
+    expect(state.pendingOps).toEqual([]);
+  });
+
   it("does not queue local scan changes in pull-only mode", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({ "note.md": Buffer.from("local") });

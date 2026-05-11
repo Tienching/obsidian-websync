@@ -23,6 +23,12 @@ Node sync service
   - Keeps an append-only operation log for diagnostics.
   - Writes files and manifest snapshots to COS.
 
+Server vault mirror
+  - Runs as a read-only subscriber next to the sync service.
+  - Applies the current manifest at startup.
+  - Subscribes to realtime WebSocket changes and keeps a filesystem mirror warm for server-side agents.
+  - Preserves dirty local mirror files under a conflict directory before applying remote content.
+
 Tencent COS
   - Stores durable files under COS_PREFIX/files/.
   - Stores the current manifest under COS_PREFIX/meta/manifest.json.
@@ -57,6 +63,7 @@ Generated build output goes to `dist/` and is ignored by git.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
 - The command palette has `WebSync: Show sync diagnostics` for queue, inflight, revision, last sync, and last error state.
 - The service exposes an authorized `GET /oplog?after=REV&limit=N` endpoint for recent operation diagnostics.
+- The optional server mirror process keeps `/home/ubuntu/obsidian-vaults/jonaszchen` close to realtime for Hermes and other server-side agents.
 - Snapshot tombstones delete local files. Empty folder creation and pruning are controlled by `.obsidian/websync-folders.json`.
 - `.obsidian` sync defaults to a standard stable set:
   - synced: `.obsidian/community-plugins.json`
@@ -181,6 +188,20 @@ For systemd, adapt:
 ```text
 deploy/systemd/obsidian-sync.service
 ```
+
+To keep a hot server-side vault mirror for agents, also run:
+
+```bash
+node dist/server/mirror.cjs
+```
+
+For systemd, adapt:
+
+```text
+deploy/systemd/websync-vault-mirror.service
+```
+
+The mirror is intentionally pull-only. It never sends `put` or `delete`; server-side edits should still be pushed with the normal WebSync helper after the agent finishes a coherent change.
 
 The production deployment should put Caddy, Nginx, or another reverse proxy in front of the service and expose:
 

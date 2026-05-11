@@ -279,6 +279,46 @@ describe("ManifestStore", () => {
     expect(store.snapshot().files["Wiki 知识网络/W1 索引地图/index.md"].deleted).not.toBe(true);
   });
 
+  it("does not advance revisions for duplicate tombstone deletes", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    const put = await store.applyPut({
+      opId: "op1",
+      path: "Wiki 知识网络/W1 索引地图/index.md",
+      content: Buffer.from("old"),
+      hash: "hash-old",
+      size: 3,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+    if (put.kind !== "accepted") {
+      throw new Error("expected put");
+    }
+    const deleted = await store.applyDelete({
+      opId: "delete-1",
+      path: "Wiki 知识网络/W1 索引地图/index.md",
+      baseRevision: put.entry.revision,
+      deviceId: "mac",
+      deviceName: "MacBook"
+    });
+    if (deleted.kind !== "deleted") {
+      throw new Error("expected delete");
+    }
+
+    await expect(
+      store.applyDelete({
+        opId: "delete-duplicate",
+        path: "Wiki 知识网络/W1 索引地图/index.md",
+        baseRevision: deleted.entry.revision,
+        deviceId: "mac",
+        deviceName: "MacBook"
+      })
+    ).resolves.toMatchObject({ kind: "deleted", entry: deleted.entry });
+    expect(store.snapshot().revision).toBe(deleted.entry.revision);
+  });
+
   it("ignores deletes for paths that are not in the remote manifest", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

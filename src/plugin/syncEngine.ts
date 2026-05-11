@@ -248,6 +248,9 @@ export class SyncEngine {
     if (!path || !this.canUpload() || !this.isSyncablePath(path) || this.isSuppressed(path) || this.replacingLocalFromRemote) {
       return;
     }
+    if (this.options.getState().knownFiles[path]?.deleted) {
+      return;
+    }
     this.queueDelete(path);
     void this.flushQueue();
   }

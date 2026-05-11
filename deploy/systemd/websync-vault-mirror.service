@@ -1,0 +1,19 @@
+[Unit]
+Description=WebSync Obsidian Vault Mirror
+After=network-online.target obsidian-sync.service
+Wants=network-online.target obsidian-sync.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/obsidian-sync
+EnvironmentFile=/home/ubuntu/obsidian-sync/.env
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=OBS_SYNC_MIRROR_VAULT_PATH=/home/ubuntu/obsidian-vaults/jonaszchen
+ExecStart=/usr/bin/env node /home/ubuntu/obsidian-sync/dist/server/mirror.cjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

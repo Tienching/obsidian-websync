@@ -170,6 +170,9 @@ export class ManifestStore {
     if (!current) {
       return { kind: "ignored", message: "Path is not in the remote manifest" };
     }
+    if (current.deleted) {
+      return { kind: "deleted", entry: current };
+    }
     if (current && !current.deleted && current.revision > op.baseRevision) {
       return { kind: "stale", entry: current, message: "Delete rejected because remote file changed first" };
     }
