@@ -1030,13 +1030,127 @@ describe("SyncEngine helpers", () => {
       path: "Wiki 知识网络/W1 索引地图/index.md"
     });
   });
+
+  it("drops stale pending deletes when the local file exists during snapshot reconcile", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const content = Buffer.from("restored");
+    const adapter = new FakeAdapter({ "Wiki 知识网络/W1 索引地图/index.md": content });
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {},
+      pendingOps: [{
+        opId: "old-delete",
+        type: "delete",
+        path: "Wiki 知识网络/W1 索引地图/index.md",
+        baseRevision: 10,
+        createdAt: 1
+      }]
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        reconcileSnapshot(manifest: ManifestSnapshot): Promise<void>;
+      }
+    ).reconcileSnapshot({
+      vaultId: "vault",
+      revision: 20,
+      files: {
+        "Wiki 知识网络/W1 索引地图/index.md": {
+          ...entry("Wiki 知识网络/W1 索引地图/index.md"),
+          hash: sha256Hex(content),
+          revision: 20
+        }
+      }
+    });
+
+    expect(state.pendingOps).toEqual([]);
+    expect(await adapter.exists("Wiki 知识网络/W1 索引地图/index.md")).toBe(true);
+  });
+
+  it("does not apply stale case-variant tombstones over newer live files", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const lowerPath = "Wiki 知识网络/W1 索引地图/index.md";
+    const upperPath = "WIKI 知识网络/W1 索引地图/index.md";
+    const content = Buffer.from("restored wiki index");
+    const contentHash = sha256Hex(content);
+    const adapter = new FakeAdapter({ [lowerPath]: content }, { caseInsensitive: true });
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        [lowerPath]: { hash: contentHash, revision: 277 },
+        [upperPath]: { hash: "old", revision: 36, deleted: true }
+      },
+      pendingOps: []
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        reconcileSnapshot(manifest: ManifestSnapshot): Promise<void>;
+      }
+    ).reconcileSnapshot({
+      vaultId: "vault",
+      revision: 277,
+      files: {
+        [upperPath]: {
+          ...entry(upperPath),
+          revision: 36,
+          deleted: true
+        },
+        [lowerPath]: {
+          ...entry(lowerPath),
+          hash: contentHash,
+          revision: 277
+        }
+      }
+    });
+
+    expect(await adapter.exists(lowerPath)).toBe(true);
+    expect(adapter.readUtf8(lowerPath)).toBe("restored wiki index");
+    expect(state.pendingOps).toEqual([]);
+  });
 });
+
+interface FakeAdapterOptions {
+  caseInsensitive?: boolean;
+}
 
 class FakeAdapter {
   readonly files = new Map<string, ArrayBuffer>();
   readonly folders = new Set<string>();
 
-  constructor(initialFiles: Record<string, Buffer>) {
+  constructor(initialFiles: Record<string, Buffer>, private readonly options: FakeAdapterOptions = {}) {
     for (const [path, content] of Object.entries(initialFiles)) {
       this.files.set(path, toArrayBuffer(content));
       const parts = path.split("/");
@@ -1050,11 +1164,12 @@ class FakeAdapter {
   }
 
   async exists(path: string): Promise<boolean> {
-    return this.files.has(path) || this.folders.has(path);
+    return Boolean(this.resolveFileKey(path) || this.resolveFolderKey(path));
   }
 
   async readBinary(path: string): Promise<ArrayBuffer> {
-    const content = this.files.get(path);
+    const key = this.resolveFileKey(path);
+    const content = key ? this.files.get(key) : undefined;
     if (!content) {
       throw new Error(`Missing file: ${path}`);
     }
@@ -1062,14 +1177,17 @@ class FakeAdapter {
   }
 
   async writeBinary(path: string, content: ArrayBuffer): Promise<void> {
-    this.files.set(path, content.slice(0));
+    this.files.set(this.resolveFileKey(path) ?? path, content.slice(0));
   }
 
   async remove(path: string): Promise<void> {
-    if (this.folders.has(path)) {
+    if (this.resolveFolderKey(path)) {
       throw new Error(`EPERM: operation not permitted, unlink '${path}'`);
     }
-    this.files.delete(path);
+    const key = this.resolveFileKey(path);
+    if (key) {
+      this.files.delete(key);
+    }
   }
 
   async rmdir(path: string, recursive?: boolean): Promise<void> {
@@ -1114,7 +1232,33 @@ class FakeAdapter {
   }
 
   readUtf8(path: string): string {
-    return Buffer.from(this.files.get(path)!).toString("utf8");
+    return Buffer.from(this.files.get(this.resolveFileKey(path)!)!).toString("utf8");
+  }
+
+  private resolveFileKey(path: string): string | undefined {
+    return this.resolveKey(this.files.keys(), path);
+  }
+
+  private resolveFolderKey(path: string): string | undefined {
+    return this.resolveKey(this.folders.values(), path);
+  }
+
+  private resolveKey(keys: Iterable<string>, path: string): string | undefined {
+    if (!this.options.caseInsensitive) {
+      for (const key of keys) {
+        if (key === path) {
+          return key;
+        }
+      }
+      return undefined;
+    }
+    const folded = path.normalize("NFC").toLowerCase();
+    for (const key of keys) {
+      if (key.normalize("NFC").toLowerCase() === folded) {
+        return key;
+      }
+    }
+    return undefined;
   }
 }
 

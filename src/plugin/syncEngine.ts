@@ -129,7 +129,6 @@ export class SyncEngine {
         })
       );
       this.setStatus("sync connected");
-      void this.flushQueue();
     };
 
     socket.onmessage = (event) => {
@@ -368,6 +367,8 @@ export class SyncEngine {
     }
 
     try {
+      await this.dropUnsafePendingDeletes(manifest);
+      const liveCaseVariants = this.buildLiveCaseVariantIndex(manifest);
       if (settings.syncOnStart && !replaceLocalOnStart && this.canUpload()) {
         await this.scanLocalFiles();
         await this.refreshFolderManifest();
@@ -379,6 +380,11 @@ export class SyncEngine {
           }
           const localKnown = state.knownFiles[path];
           if (entry.deleted) {
+            const liveVariant = liveCaseVariants.get(caseFoldPath(path));
+            if (liveVariant && liveVariant.path !== path && liveVariant.revision > entry.revision) {
+              state.knownFiles[path] = knownFromEntry(entry);
+              continue;
+            }
             if (!localKnown || entry.revision >= localKnown.revision) {
               await this.deleteRemoteFile(path);
               state.knownFiles[path] = knownFromEntry(entry);
@@ -396,6 +402,44 @@ export class SyncEngine {
     }
     await this.options.save();
     await this.flushQueue();
+  }
+
+  private async dropUnsafePendingDeletes(manifest: ManifestSnapshot): Promise<void> {
+    const state = this.options.getState();
+    const next: PendingOperation[] = [];
+    let changed = false;
+    for (const op of state.pendingOps) {
+      if (op.type !== "delete") {
+        next.push(op);
+        continue;
+      }
+      const remote = manifest.files[op.path];
+      const localExists = await this.options.app.vault.adapter.exists(op.path);
+      if (localExists || (remote && !remote.deleted && remote.revision > op.baseRevision)) {
+        changed = true;
+        continue;
+      }
+      next.push(op);
+    }
+    if (changed) {
+      state.pendingOps = next;
+      await this.options.save();
+    }
+  }
+
+  private buildLiveCaseVariantIndex(manifest: ManifestSnapshot): Map<string, ManifestFileEntry> {
+    const out = new Map<string, ManifestFileEntry>();
+    for (const entry of Object.values(manifest.files)) {
+      if (entry.deleted || !this.isSyncablePath(entry.path)) {
+        continue;
+      }
+      const key = caseFoldPath(entry.path);
+      const existing = out.get(key);
+      if (!existing || entry.revision > existing.revision) {
+        out.set(key, entry);
+      }
+    }
+    return out;
   }
 
   private async replaceLocalWithRemoteManifest(manifest: ManifestSnapshot): Promise<void> {
@@ -1114,6 +1158,10 @@ function safePath(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function caseFoldPath(path: string): string {
+  return normalizeVaultPath(path).normalize("NFC").toLowerCase();
 }
 
 function isPrunableEmptyFolderCandidate(pathInput: string): boolean {
