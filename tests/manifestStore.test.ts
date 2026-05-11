@@ -230,6 +230,55 @@ describe("ManifestStore", () => {
     expect(deleted.entry.deleted).toBe(true);
   });
 
+  it("rejects stale deletes from the same device after a newer put", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    const first = await store.applyPut({
+      opId: "op1",
+      path: "Wiki 知识网络/W1 索引地图/index.md",
+      content: Buffer.from("old"),
+      hash: "hash-old",
+      size: 3,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+    if (first.kind !== "accepted") {
+      throw new Error("expected first put");
+    }
+
+    const second = await store.applyPut({
+      opId: "op2",
+      path: "Wiki 知识网络/W1 索引地图/index.md",
+      content: Buffer.from("restored"),
+      hash: "hash-restored",
+      size: 8,
+      baseRevision: first.entry.revision,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 2
+    });
+    if (second.kind !== "accepted") {
+      throw new Error("expected second put");
+    }
+
+    await expect(
+      store.applyDelete({
+        opId: "old-delete",
+        path: "Wiki 知识网络/W1 索引地图/index.md",
+        baseRevision: first.entry.revision,
+        deviceId: "mac",
+        deviceName: "MacBook"
+      })
+    ).resolves.toMatchObject({ kind: "stale" });
+    expect(store.snapshot().files["Wiki 知识网络/W1 索引地图/index.md"]).toMatchObject({
+      revision: second.entry.revision,
+      hash: "hash-restored"
+    });
+    expect(store.snapshot().files["Wiki 知识网络/W1 索引地图/index.md"].deleted).not.toBe(true);
+  });
+
   it("ignores deletes for paths that are not in the remote manifest", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

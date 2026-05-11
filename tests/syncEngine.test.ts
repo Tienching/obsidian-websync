@@ -952,6 +952,43 @@ describe("SyncEngine helpers", () => {
       lastSyncedAt: expect.any(String)
     });
   });
+
+  it("coalesces opposite pending operations for the same path", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "Wiki 知识网络/W1 索引地图/index.md": Buffer.from("restored") });
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        "Wiki 知识网络/W1 索引地图/index.md": { hash: "old", revision: 10 }
+      },
+      pendingOps: []
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    (engine as unknown as { queueDelete(path: string): void }).queueDelete("Wiki 知识网络/W1 索引地图/index.md");
+    (engine as unknown as { queuePut(path: string): void }).queuePut("Wiki 知识网络/W1 索引地图/index.md");
+
+    expect(state.pendingOps).toHaveLength(1);
+    expect(state.pendingOps[0]).toMatchObject({
+      type: "put",
+      path: "Wiki 知识网络/W1 索引地图/index.md"
+    });
+  });
 });
 
 class FakeAdapter {

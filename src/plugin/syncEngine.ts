@@ -286,7 +286,7 @@ export class SyncEngine {
 
   private replacePending(op: PendingOperation): void {
     const state = this.options.getState();
-    state.pendingOps = state.pendingOps.filter((existing) => existing.path !== op.path || existing.type !== op.type);
+    state.pendingOps = state.pendingOps.filter((existing) => existing.path !== op.path);
     state.pendingOps.push(op);
     void this.options.save();
   }
