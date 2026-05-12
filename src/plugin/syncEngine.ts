@@ -112,6 +112,7 @@ export class SyncEngine {
     }
 
     this.socket?.close();
+    this.remoteManifest = undefined;
     const socket = new WebSocket(settings.serverUrl);
     this.socket = socket;
     this.setStatus("sync connecting");
@@ -357,6 +358,7 @@ export class SyncEngine {
     const state = this.options.getState();
     const settings = this.options.getSettings();
     const replaceLocalOnStart = settings.replaceLocalOnStart && this.canApplyRemote();
+    this.remoteManifest = manifest;
 
     if (replaceLocalOnStart) {
       this.replacingLocalFromRemote = true;
@@ -368,7 +370,6 @@ export class SyncEngine {
 
     try {
       await this.dropUnsafePendingDeletes(manifest);
-      const liveCaseVariants = this.buildLiveCaseVariantIndex(manifest);
       if (settings.syncOnStart && !replaceLocalOnStart && this.canUpload()) {
         await this.scanLocalFiles();
         await this.refreshFolderManifest();
@@ -380,15 +381,7 @@ export class SyncEngine {
           }
           const localKnown = state.knownFiles[path];
           if (entry.deleted) {
-            const liveVariant = liveCaseVariants.get(caseFoldPath(path));
-            if (liveVariant && liveVariant.path !== path && liveVariant.revision > entry.revision) {
-              state.knownFiles[path] = knownFromEntry(entry);
-              continue;
-            }
-            if (!localKnown || entry.revision >= localKnown.revision) {
-              await this.deleteRemoteFile(path);
-              state.knownFiles[path] = knownFromEntry(entry);
-            }
+            await this.applyRemoteDelete(entry, localKnown);
             continue;
           }
           if (!localKnown || localKnown.hash !== entry.hash || localKnown.revision < entry.revision) {
@@ -425,21 +418,6 @@ export class SyncEngine {
       state.pendingOps = next;
       await this.options.save();
     }
-  }
-
-  private buildLiveCaseVariantIndex(manifest: ManifestSnapshot): Map<string, ManifestFileEntry> {
-    const out = new Map<string, ManifestFileEntry>();
-    for (const entry of Object.values(manifest.files)) {
-      if (entry.deleted || !this.isSyncablePath(entry.path)) {
-        continue;
-      }
-      const key = caseFoldPath(entry.path);
-      const existing = out.get(key);
-      if (!existing || entry.revision > existing.revision) {
-        out.set(key, entry);
-      }
-    }
-    return out;
   }
 
   private async replaceLocalWithRemoteManifest(manifest: ManifestSnapshot): Promise<void> {
@@ -578,6 +556,9 @@ export class SyncEngine {
     const queue = [...state.pendingOps];
     for (const op of queue) {
       if (this.inflight.has(op.opId)) {
+        continue;
+      }
+      if (op.type === "delete" && !this.remoteManifest) {
         continue;
       }
       if (op.type === "put") {
@@ -730,9 +711,9 @@ export class SyncEngine {
     if (!this.canApplyRemote() || !this.isSyncablePath(message.entry.path)) {
       return;
     }
+    this.rememberManifestEntry(message.entry);
     if (message.action === "delete") {
-      await this.deleteRemoteFile(message.entry.path);
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      await this.applyRemoteDelete(message.entry);
       this.markSynced();
       await this.options.save();
       return;
@@ -766,8 +747,8 @@ export class SyncEngine {
       this.markSynced();
       await this.options.save();
     } else if (message.status === "deleted") {
-      await this.deleteRemoteFile(message.entry.path);
-      this.options.getState().knownFiles[message.entry.path] = knownFromEntry(message.entry);
+      this.rememberManifestEntry(message.entry);
+      await this.applyRemoteDelete(message.entry);
       this.markSynced();
       await this.options.save();
     }
@@ -1059,6 +1040,31 @@ export class SyncEngine {
     }
   }
 
+  private async applyRemoteDelete(entry: ManifestFileEntry, localKnown = this.options.getState().knownFiles[entry.path]): Promise<void> {
+    this.rememberManifestEntry(entry);
+    if (this.hasLiveCaseVariant(entry)) {
+      this.options.getState().knownFiles[entry.path] = knownFromEntry(entry);
+      return;
+    }
+    if (!localKnown || entry.revision >= localKnown.revision) {
+      await this.deleteRemoteFile(entry.path);
+      this.options.getState().knownFiles[entry.path] = knownFromEntry(entry);
+    }
+  }
+
+  private hasLiveCaseVariant(entry: ManifestFileEntry): boolean {
+    if (!this.remoteManifest) {
+      return false;
+    }
+    const key = caseFoldPath(entry.path);
+    return Object.values(this.remoteManifest.files).some((candidate) => (
+      candidate.path !== entry.path
+      && !candidate.deleted
+      && this.isSyncablePath(candidate.path)
+      && caseFoldPath(candidate.path) === key
+    ));
+  }
+
   private async hashFile(path: string): Promise<string> {
     return sha256Hex(await this.options.app.vault.adapter.readBinary(path));
   }
@@ -1111,11 +1117,22 @@ export class SyncEngine {
   }
 
   private rememberKnownFile(entry: ManifestFileEntry, contentBase64?: string): void {
+    this.rememberManifestEntry(entry);
     const known = knownFromEntry(entry);
     if (!entry.deleted && contentBase64 && isMergeableTextPath(entry.path)) {
       known.contentBase64 = contentBase64;
     }
     this.options.getState().knownFiles[entry.path] = known;
+  }
+
+  private rememberManifestEntry(entry: ManifestFileEntry): void {
+    if (!this.remoteManifest) {
+      return;
+    }
+    this.remoteManifest.files[entry.path] = entry;
+    if (entry.revision > this.remoteManifest.revision) {
+      this.remoteManifest.revision = entry.revision;
+    }
   }
 
   private markSynced(): void {

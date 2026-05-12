@@ -1034,14 +1034,17 @@ describe("SyncEngine helpers", () => {
   it("drops stale pending deletes when the local file exists during snapshot reconcile", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const content = Buffer.from("restored");
-    const adapter = new FakeAdapter({ "Wiki 知识网络/W1 索引地图/index.md": content });
+    const path = "Wiki 知识网络/W1 索引地图/index.md";
+    const adapter = new FakeAdapter({ [path]: content });
     const state: LocalSyncState = {
       deviceId: "device-a",
-      knownFiles: {},
+      knownFiles: {
+        [path]: { hash: sha256Hex(content), revision: 20 }
+      },
       pendingOps: [{
         opId: "old-delete",
         type: "delete",
-        path: "Wiki 知识网络/W1 索引地图/index.md",
+        path,
         baseRevision: 10,
         createdAt: 1
       }]
@@ -1071,8 +1074,8 @@ describe("SyncEngine helpers", () => {
       vaultId: "vault",
       revision: 20,
       files: {
-        "Wiki 知识网络/W1 索引地图/index.md": {
-          ...entry("Wiki 知识网络/W1 索引地图/index.md"),
+        [path]: {
+          ...entry(path),
           hash: sha256Hex(content),
           revision: 20
         }
@@ -1080,10 +1083,10 @@ describe("SyncEngine helpers", () => {
     });
 
     expect(state.pendingOps).toEqual([]);
-    expect(await adapter.exists("Wiki 知识网络/W1 索引地图/index.md")).toBe(true);
+    expect(await adapter.exists(path)).toBe(true);
   });
 
-  it("does not apply stale case-variant tombstones over newer live files", async () => {
+  it("does not apply case-variant tombstones over live files", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const lowerPath = "Wiki 知识网络/W1 索引地图/index.md";
     const upperPath = "WIKI 知识网络/W1 索引地图/index.md";
@@ -1125,7 +1128,7 @@ describe("SyncEngine helpers", () => {
       files: {
         [upperPath]: {
           ...entry(upperPath),
-          revision: 36,
+          revision: 300,
           deleted: true
         },
         [lowerPath]: {
@@ -1138,6 +1141,168 @@ describe("SyncEngine helpers", () => {
 
     expect(await adapter.exists(lowerPath)).toBe(true);
     expect(adapter.readUtf8(lowerPath)).toBe("restored wiki index");
+    expect(state.pendingOps).toEqual([]);
+  });
+
+  it("does not apply realtime case-variant tombstones over live files", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const lowerPath = "Wiki 知识网络/W1 索引地图/index.md";
+    const upperPath = "WIKI 知识网络/W1 索引地图/index.md";
+    const content = Buffer.from("restored wiki index");
+    const contentHash = sha256Hex(content);
+    const adapter = new FakeAdapter({ [lowerPath]: content }, { caseInsensitive: true });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const liveEntry = { ...entry(lowerPath), hash: contentHash, revision: 277 };
+    const tombstoneEntry = { ...entry(upperPath), revision: 300, deleted: true };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (engine as unknown as { remoteManifest: ManifestSnapshot }).remoteManifest = {
+      vaultId: "vault",
+      revision: 300,
+      files: {
+        [lowerPath]: liveEntry,
+        [upperPath]: tombstoneEntry
+      }
+    };
+
+    await (
+      engine as unknown as {
+        handleServerMessage(message: unknown): Promise<void>;
+      }
+    ).handleServerMessage({
+      type: "remote-change",
+      action: "delete",
+      entry: tombstoneEntry
+    });
+
+    expect(await adapter.exists(lowerPath)).toBe(true);
+    expect(adapter.readUtf8(lowerPath)).toBe("restored wiki index");
+    expect(state.knownFiles[upperPath]).toMatchObject({ revision: 300, deleted: true });
+  });
+
+  it("does not apply pulled case-variant tombstones over live files", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const lowerPath = "Wiki 知识网络/W1 索引地图/index.md";
+    const upperPath = "WIKI 知识网络/W1 索引地图/index.md";
+    const content = Buffer.from("restored wiki index");
+    const contentHash = sha256Hex(content);
+    const adapter = new FakeAdapter({ [lowerPath]: content }, { caseInsensitive: true });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const liveEntry = { ...entry(lowerPath), hash: contentHash, revision: 277 };
+    const tombstoneEntry = { ...entry(upperPath), revision: 300, deleted: true };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (engine as unknown as { remoteManifest: ManifestSnapshot }).remoteManifest = {
+      vaultId: "vault",
+      revision: 300,
+      files: {
+        [lowerPath]: liveEntry,
+        [upperPath]: tombstoneEntry
+      }
+    };
+
+    await (
+      engine as unknown as {
+        applyPulledContent(message: unknown): Promise<void>;
+      }
+    ).applyPulledContent({
+      type: "file-content",
+      status: "deleted",
+      entry: tombstoneEntry
+    });
+
+    expect(await adapter.exists(lowerPath)).toBe(true);
+    expect(adapter.readUtf8(lowerPath)).toBe("restored wiki index");
+    expect(state.knownFiles[upperPath]).toMatchObject({ revision: 300, deleted: true });
+  });
+
+  it("does not flush pending deletes before the first remote manifest", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = "Wiki 知识网络/W1 索引地图/index.md";
+    const content = Buffer.from("restored");
+    const adapter = new FakeAdapter({ [path]: content });
+    const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    const state: LocalSyncState = {
+      deviceId: "device-a",
+      knownFiles: {
+        [path]: { hash: sha256Hex(content), revision: 20 }
+      },
+      pendingOps: [{
+        opId: "old-delete",
+        type: "delete",
+        path,
+        baseRevision: 10,
+        createdAt: 1
+      }]
+    };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (folderPath: string) => {
+            adapter.folders.add(folderPath);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+    (engine as unknown as { socket: typeof socket }).socket = socket;
+
+    await (engine as unknown as { flushQueue(): Promise<void> }).flushQueue();
+
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(state.pendingOps).toHaveLength(1);
+
+    await (
+      engine as unknown as {
+        reconcileSnapshot(manifest: ManifestSnapshot): Promise<void>;
+      }
+    ).reconcileSnapshot({
+      vaultId: "vault",
+      revision: 20,
+      files: {
+        [path]: {
+          ...entry(path),
+          hash: sha256Hex(content),
+          revision: 20
+        }
+      }
+    });
+
+    expect(socket.send).not.toHaveBeenCalled();
     expect(state.pendingOps).toEqual([]);
   });
 });
@@ -1191,23 +1356,31 @@ class FakeAdapter {
   }
 
   async rmdir(path: string, recursive?: boolean): Promise<void> {
-    if (!recursive && ([...this.files.keys()].some((file) => file.startsWith(`${path}/`)) || [...this.folders].some((folder) => folder.startsWith(`${path}/`)))) {
+    const folderKey = this.resolveFolderKey(path) ?? path;
+    if (!recursive && ([...this.files.keys()].some((file) => file.startsWith(`${folderKey}/`)) || [...this.folders].some((folder) => folder.startsWith(`${folderKey}/`)))) {
       throw new Error(`Folder is not empty: ${path}`);
     }
     for (const file of [...this.files.keys()]) {
-      if (file === path || file.startsWith(`${path}/`)) {
+      if (file === folderKey || file.startsWith(`${folderKey}/`)) {
         this.files.delete(file);
       }
     }
     for (const folder of [...this.folders]) {
-      if (folder === path || folder.startsWith(`${path}/`)) {
+      if (folder === folderKey || folder.startsWith(`${folderKey}/`)) {
         this.folders.delete(folder);
       }
     }
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
-    const prefix = path ? `${path}/` : "";
+    if (this.resolveFileKey(path)) {
+      throw new Error(`Not a folder: ${path}`);
+    }
+    const folderKey = path ? this.resolveFolderKey(path) : "";
+    if (path && !folderKey) {
+      throw new Error(`Missing folder: ${path}`);
+    }
+    const prefix = folderKey ? `${folderKey}/` : "";
     const files: string[] = [];
     const folders: string[] = [];
     for (const file of this.files.keys()) {

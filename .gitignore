@@ -3,3 +3,6 @@ node_modules/
 .cos-seed-env
 .env
 dist/
+data/
+mirror-state.json
+mirror-conflicts/

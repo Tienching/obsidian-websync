@@ -47,7 +47,7 @@ manifest.json      Obsidian plugin manifest
 styles.css         Obsidian plugin styles
 ```
 
-Generated build output goes to `dist/` and is ignored by git.
+Generated build output goes to `dist/` and is ignored by git. Runtime state such as `data/manifest.json`, `data/oplog.jsonl`, `mirror-state.json`, and `mirror-conflicts/` is also ignored and must not be committed.
 
 ## Current Behavior
 
@@ -115,7 +115,7 @@ COS_SECRET_ID=change-me
 COS_SECRET_KEY=change-me
 ```
 
-Never commit `.env`.
+Never commit `.env` or runtime state under `OBS_SYNC_DATA_DIR`.
 
 ## Build
 
@@ -242,6 +242,8 @@ npm run seed:cos
 ```
 
 `seed:cos` is useful when resetting a prefix cleanly. It refuses to wipe unless `SEED_WIPE_CONFIRM` matches the target prefix.
+
+The sync service treats the local `OBS_SYNC_DATA_DIR/manifest.json` as the first startup source and only falls back to COS when that file is missing or unreadable. If you directly reset or edit COS, stop the service first and make the matching change to the exact server `OBS_SYNC_DATA_DIR/manifest.json` as well, or remove the local manifest intentionally so the next start loads from COS. After any manual manifest cleanup, restart the service and verify `/manifest-page` before clients reconnect.
 
 ## Mobile Bootstrap
 
