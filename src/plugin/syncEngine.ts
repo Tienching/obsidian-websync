@@ -266,7 +266,7 @@ export class SyncEngine {
     const baseContentBase64 = isMergeableTextPath(path)
       ? options.baseContentBase64 ?? existing?.baseContentBase64 ?? state.knownFiles[path]?.contentBase64
       : undefined;
-    if (baseContentBase64) {
+    if (baseContentBase64 !== undefined) {
       op.baseContentBase64 = baseContentBase64;
     }
     const folderManifestBaseFolders = path === FOLDER_MANIFEST_PATH
@@ -635,10 +635,10 @@ export class SyncEngine {
       if (canonicalEntry) {
         await this.mergeAndRetryMarkdown(op, canonicalEntry, message.canonicalContentBase64);
       }
-    } else if (message.status === "conflict" && op?.contentBase64 && message.entry && message.canonicalEntry) {
+    } else if (message.status === "conflict" && op?.contentBase64 !== undefined && message.entry && message.canonicalEntry) {
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(op.contentBase64));
       this.rememberKnownFile(message.entry, op.contentBase64);
-      if (message.canonicalContentBase64) {
+      if (message.canonicalContentBase64 !== undefined) {
         await this.writeRemoteFile(message.canonicalEntry.path, base64ToArrayBuffer(message.canonicalContentBase64));
         this.rememberKnownFile(message.canonicalEntry, message.canonicalContentBase64);
       }
@@ -652,7 +652,7 @@ export class SyncEngine {
   }
 
   private async mergeAndRetryFolderManifest(op: InflightOperation, canonicalEntry: ManifestFileEntry, canonicalContentBase64?: string): Promise<void> {
-    if (!op.contentBase64 || !canonicalContentBase64) {
+    if (op.contentBase64 === undefined || canonicalContentBase64 === undefined) {
       await this.requestPull(FOLDER_MANIFEST_PATH);
       return;
     }
@@ -676,7 +676,7 @@ export class SyncEngine {
   }
 
   private async mergeAndRetryMarkdown(op: InflightOperation, canonicalEntry: ManifestFileEntry, canonicalContentBase64?: string): Promise<void> {
-    if (!op.contentBase64 || !op.baseContentBase64 || !canonicalContentBase64) {
+    if (op.contentBase64 === undefined || op.baseContentBase64 === undefined || canonicalContentBase64 === undefined) {
       await this.requestPull(op.path);
       return;
     }
@@ -718,7 +718,7 @@ export class SyncEngine {
       await this.options.save();
       return;
     }
-    if (!message.contentBase64) {
+    if (message.contentBase64 === undefined) {
       await this.requestPull(message.entry.path);
       return;
     }
@@ -737,7 +737,7 @@ export class SyncEngine {
     if (!this.canApplyRemote() || !this.isSyncablePath(message.entry.path)) {
       return;
     }
-    if (message.status === "found" && message.contentBase64) {
+    if (message.status === "found" && message.contentBase64 !== undefined) {
       await this.preserveLocalConflictIfNeeded(message.entry.path, message.entry.hash);
       await this.writeRemoteFile(message.entry.path, base64ToArrayBuffer(message.contentBase64));
       this.rememberKnownFile(message.entry, message.contentBase64);
@@ -1119,7 +1119,7 @@ export class SyncEngine {
   private rememberKnownFile(entry: ManifestFileEntry, contentBase64?: string): void {
     this.rememberManifestEntry(entry);
     const known = knownFromEntry(entry);
-    if (!entry.deleted && contentBase64 && isMergeableTextPath(entry.path)) {
+    if (!entry.deleted && contentBase64 !== undefined && isMergeableTextPath(entry.path)) {
       known.contentBase64 = contentBase64;
     }
     this.options.getState().knownFiles[entry.path] = known;
@@ -1241,17 +1241,17 @@ function isFolderManifestCandidate(pathInput: string): boolean {
 
 function isFolderManifestRetryAck(message: AckMessage, op: InflightOperation): boolean {
   return op?.path === FOLDER_MANIFEST_PATH
-    && Boolean(op.contentBase64)
-    && Boolean(message.canonicalContentBase64)
+    && op.contentBase64 !== undefined
+    && message.canonicalContentBase64 !== undefined
     && (message.status === "stale" || message.status === "conflict");
 }
 
 function isMarkdownRetryAck(message: AckMessage, op: InflightOperation): boolean {
   return isMergeableTextPath(op.path)
     && op.path !== FOLDER_MANIFEST_PATH
-    && Boolean(op.contentBase64)
-    && Boolean(op.baseContentBase64)
-    && Boolean(message.canonicalContentBase64)
+    && op.contentBase64 !== undefined
+    && op.baseContentBase64 !== undefined
+    && message.canonicalContentBase64 !== undefined
     && (message.status === "stale" || message.status === "conflict");
 }
 

@@ -146,6 +146,45 @@ describe("ManifestStore", () => {
     expect(store.snapshot().files["WIKI/a.md"].hash).toBe("hash-remote");
   });
 
+  it("rejects cross-device zero-byte markdown overwrites of non-empty files", async () => {
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
+
+    const put = await store.applyPut({
+      opId: "op1",
+      path: "WIKI/a.md",
+      content: Buffer.from("remote"),
+      hash: "hash-remote",
+      size: 6,
+      baseRevision: 0,
+      deviceId: "mac",
+      deviceName: "MacBook",
+      mtime: 1
+    });
+    if (put.kind !== "accepted") {
+      throw new Error("expected accepted put");
+    }
+
+    const result = await store.applyPut({
+      opId: "op2",
+      path: "WIKI/a.md",
+      content: Buffer.alloc(0),
+      hash: "hash-empty",
+      size: 0,
+      baseRevision: put.entry.revision,
+      deviceId: "iphone",
+      deviceName: "iPhone",
+      mtime: 2
+    });
+
+    expect(result.kind).toBe("stale");
+    expect(store.snapshot().revision).toBe(put.entry.revision);
+    expect(store.snapshot().files["WIKI/a.md"]).toMatchObject({
+      hash: "hash-remote",
+      size: 6,
+      updatedBy: "mac"
+    });
+  });
+
   it("returns stale instead of creating conflict copies for concurrent folder manifests", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
     const firstContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old"] }));

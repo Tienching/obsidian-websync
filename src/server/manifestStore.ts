@@ -125,6 +125,10 @@ export class ManifestStore {
       return { kind: "accepted", entry: current };
     }
 
+    if (current && isSuspiciousZeroByteTextOverwrite(path, current, op)) {
+      return { kind: "stale", entry: current, message: "Zero-byte text overwrite rejected because the remote file is non-empty" };
+    }
+
     const hasStaleBase = current && !current.deleted && current.revision > op.baseRevision && current.updatedBy !== op.deviceId;
     if (hasStaleBase && shouldReturnStaleForClientMerge(path)) {
       return { kind: "stale", entry: current, message: "Remote file changed first" };
@@ -249,4 +253,14 @@ export class ManifestStore {
 function shouldReturnStaleForClientMerge(path: string): boolean {
   const lower = path.toLowerCase();
   return lower === FOLDER_MANIFEST_PATH || lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+function isSuspiciousZeroByteTextOverwrite(path: string, current: ManifestFileEntry, op: PutOperation): boolean {
+  return Boolean(
+    !current.deleted
+    && shouldReturnStaleForClientMerge(path)
+    && current.size > 0
+    && op.size === 0
+    && current.updatedBy !== op.deviceId
+  );
 }

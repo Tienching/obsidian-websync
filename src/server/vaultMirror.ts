@@ -48,7 +48,7 @@ export class VaultMirror {
 
   async applyRemoteChange(message: RemoteChangeMessage): Promise<void> {
     await this.loadState();
-    await this.applyEntry(message.entry, message.contentBase64 ? Buffer.from(message.contentBase64, "base64") : undefined);
+    await this.applyEntry(message.entry, message.contentBase64 !== undefined ? Buffer.from(message.contentBase64, "base64") : undefined);
     await this.saveState();
   }
 

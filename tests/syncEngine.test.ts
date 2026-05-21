@@ -535,6 +535,52 @@ describe("SyncEngine helpers", () => {
     expect(state.knownFiles).toEqual({});
   });
 
+  it("applies single-frame empty file content", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("old") });
+    const emptyHash = sha256Hex(Buffer.alloc(0));
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({
+      app: {
+        vault: {
+          adapter,
+          createFolder: async (path: string) => {
+            adapter.folders.add(path);
+          },
+          getFiles: () => []
+        }
+      } as any,
+      getSettings: () => settings(),
+      getState: () => state,
+      save: vi.fn(async () => undefined),
+      setStatus: vi.fn(),
+      registerEvent: vi.fn()
+    });
+
+    await (
+      engine as unknown as {
+        applyPulledContent(message: unknown): Promise<void>;
+      }
+    ).applyPulledContent({
+      type: "file-content",
+      status: "found",
+      entry: {
+        ...entry("note.md"),
+        hash: emptyHash,
+        size: 0,
+        revision: 2
+      },
+      contentBase64: ""
+    });
+
+    expect(adapter.readUtf8("note.md")).toBe("");
+    expect(state.knownFiles["note.md"]).toMatchObject({
+      hash: emptyHash,
+      revision: 2,
+      contentBase64: ""
+    });
+  });
+
   it("creates folders declared by the folder manifest", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
