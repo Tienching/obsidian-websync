@@ -4,6 +4,12 @@
 
 Before any production rollout, independently back up the vault, server state and cloud objects; verify restoration and migration/rollback in isolation; test real devices and coordinate their upgrades. Overlapping edits or deletion-versus-edit conflicts can still require manual resolution. Mobile background execution, uninterrupted network connectivity and sub-second delivery are not guaranteed. Cloud manifests are not protected against concurrent independent server writers, large uploads are not resumable, and unreferenced blobs do not yet have a safe automatic cleanup policy.
 
+An isolated simulation of the old 0.1.15 client showed that a local edit made
+inside its 2.5-second suppression window after a remote write may not be
+queued. The development client rechecks changes in that window in simulated
+tests, but this has not yet been verified on real devices. This observation
+does not establish the cause of any particular user's delayed edit.
+
 WebSync is a private realtime sync stack for an Obsidian vault. It is designed for a personal multi-device setup where a lightweight Obsidian plugin talks to a Node.js sync service, and the service persists files plus the manifest in Tencent COS.
 
 The important design choice is that COS credentials never live in the Obsidian plugin. Clients only know the WebSocket endpoint, vault id, and sync token.

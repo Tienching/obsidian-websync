@@ -51,6 +51,43 @@ afterEach(async () => {
 });
 
 describe("isolated multi-device sync", () => {
+  it("documents a lost immediate edit in the legacy 0.1.15 suppression window", async () => {
+    const LegacyEngine = await loadLegacyEngine();
+    const base = "synthetic baseline\n";
+    const { store, url } = await startServer(base);
+    const modern = makeClient("modern", base, base, url);
+    const legacy = makeClient("legacy", base, base, url, false, LegacyEngine);
+    modern.engine.start(); legacy.engine.start();
+    await waitUntil(() => modern.status === "sync ready" && !!(legacy.engine as any).remoteManifest);
+    await modern.vault.userWrite("note.md", "synthetic remote edit\n");
+    await waitUntil(() => legacy.vault.text("note.md") === "synthetic remote edit\n");
+    await waitUntil(() => modern.state.knownFiles["note.md"]?.revision === 2
+      && legacy.state.knownFiles["note.md"]?.revision === 2
+      && modern.state.pendingOps.length === 0 && legacy.state.pendingOps.length === 0);
+    expect((legacy.engine as any).isSuppressed("note.md")).toBe(true);
+    await legacy.vault.userWrite("note.md", "synthetic immediate local edit\n");
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(legacy.vault.text("note.md")).toBe("synthetic immediate local edit\n");
+    expect(legacy.state.pendingOps).toHaveLength(0);
+    expect(store.snapshot().files["note.md"].revision).toBe(2);
+  }, 10_000);
+
+  it("uploads a new-client edit made during remote-write suppression", async () => {
+    const LegacyEngine = await loadLegacyEngine();
+    const base = "synthetic baseline\n";
+    const { url } = await startServer(base);
+    const modern = makeClient("modern", base, base, url);
+    const legacy = makeClient("legacy", base, base, url, false, LegacyEngine);
+    modern.engine.start(); legacy.engine.start();
+    await waitUntil(() => modern.status === "sync ready" && !!(legacy.engine as any).remoteManifest);
+    await legacy.vault.userWrite("note.md", "synthetic remote edit\n");
+    await waitUntil(() => modern.vault.text("note.md") === "synthetic remote edit\n");
+    expect((modern.engine as any).isSuppressed("note.md")).toBe(true);
+    await modern.vault.userWrite("note.md", "synthetic immediate local edit\n");
+    await waitUntil(() => legacy.vault.text("note.md") === "synthetic immediate local edit\n", 8_000);
+    await waitUntil(() => modern.state.pendingOps.length === 0);
+  }, 12_000);
+
   it("delivers new-client edits to the actual 0.1.15 legacy bundle", async () => {
     const LegacyEngine = await loadLegacyEngine();
     const base = "正文".repeat(300);
