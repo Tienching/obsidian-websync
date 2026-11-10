@@ -69,3 +69,10 @@ jobs:
             dist/plugin/main.js dist/plugin/manifest.json dist/plugin/styles.css \
             --verify-tag --prerelease --title "$VERSION" \
             --notes-file .github/PRERELEASE_NOTES.md
+      # One-time correction of a release created with an unintended higher version.
+      # Keep its tag, notes and assets recoverable while excluding it from BRAT's latest selection.
+      - name: Return mistaken version to draft
+        if: ${{ steps.version.outputs.version == '0.1.16' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit 0.2.0-dev.2 --draft

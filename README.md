@@ -1,6 +1,6 @@
-# Obsidian WebSync — 0.2.0-dev.2
+# Obsidian WebSync — 0.1.16
 
-> **Experimental development version — not production-ready.** Version 0.2.0-dev.1 received limited checks on one real Mac against a legacy server; 0.2.0-dev.2 changes release packaging and version metadata, not the sync engine. Real mobile devices, production migration, rollback and concurrent-device conflicts have not been validated for this version. Its schema-2 storage changes cannot be safely rolled back by simply restarting the old server. Do not install this version in an active vault, run it against a production service or bucket, or treat a connected status as proof that all devices received every change. All procedures below are for isolated synthetic test environments only.
+> **Experimental version — not production-ready.** The development sync engine received limited checks on one real Mac against a legacy server; 0.1.16 changes release packaging and version metadata, not that sync engine. Real mobile devices, production migration, rollback and concurrent-device conflicts have not been validated for this version. Its schema-2 storage changes cannot be safely rolled back by simply restarting the old server. Do not install this version in an active vault, run it against a production service or bucket, or treat a connected status as proof that all devices received every change. All procedures below are for isolated synthetic test environments only.
 
 Before any production rollout, independently back up the vault, server state and cloud objects; verify restoration and migration/rollback in isolation; test real devices and coordinate their upgrades. Overlapping edits or deletion-versus-edit conflicts can still require manual resolution. Mobile background execution, uninterrupted network connectivity and sub-second delivery are not guaranteed. Cloud manifests are not protected against concurrent independent server writers, large uploads are not resumable, and unreferenced blobs do not yet have a safe automatic cleanup policy.
 
@@ -277,13 +277,13 @@ does not distribute its own executable files. Before updating, independently
 back up the vault and device sync state, wait for the queue to drain, and check
 the release notes and compatibility. Verify one device before updating another.
 
-Releases are prereleases, not a guarantee of production readiness. To make one,
+Releases are marked prerelease, not a guarantee of production readiness. To make one,
 update `manifest.json`, `package.json`, `package-lock.json`, and `versions.json`
-to the same prerelease version and push the changes to `main`, or push a tag
+to the same version and push the changes to `main`, or push a tag
 that exactly matches the version without a `v` prefix. The prerelease workflow
 runs the checks, creates the matching tag if necessary, and publishes
 `main.js`, `manifest.json`, and `styles.css` as separate release assets; it
-refuses inconsistent metadata and non-prerelease tags, never replaces an
+refuses inconsistent metadata, marks releases as prereleases, never replaces an
 existing release, and refuses an existing tag pointing to a different commit.
 GitHub Actions must be enabled and allowed to create releases. Inspect the
 workflow and the published assets before relying on the release.

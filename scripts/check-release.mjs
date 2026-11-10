@@ -1,11 +1,11 @@
-// Refuse to publish inconsistent or non-prerelease plugin artifacts.
+// Refuse to publish inconsistent plugin artifacts; the workflow marks releases as prereleases.
 import { readFile, stat } from "node:fs/promises";
 
 const tag = process.argv[2];
 const readJson = async (path) => JSON.parse(await readFile(path, "utf8"));
-const prerelease = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-(?:dev|alpha|beta|rc)\.(?:0|[1-9]\d*)$/;
+const semver = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:dev|alpha|beta|rc)\.(?:0|[1-9]\d*))?$/;
 
-if (!tag || !prerelease.test(tag)) throw new Error("An exact prerelease tag such as 0.2.0-dev.2 is required");
+if (!tag || !semver.test(tag)) throw new Error("An exact version such as 0.1.16 is required");
 
 const [manifest, outputManifest, pkg, lock, versions] = await Promise.all([
   readJson("manifest.json"), readJson("dist/plugin/manifest.json"), readJson("package.json"),
