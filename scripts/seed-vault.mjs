@@ -5,6 +5,10 @@ import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import WebSocket from "ws";
 
+// This historical seeder may overwrite or resurrect remote files. Do not
+// connect it to any service until safe initialization and recovery are tested.
+throw new Error("Vault seeding is disabled in this development prototype to protect existing data");
+
 const vault = process.env.OBSIDIAN_VAULT_PATH ?? join(homedir(), "Documents", "Obsidian");
 const serverUrl = process.env.OBS_SYNC_SERVER_URL ?? "wss://your-domain.example/sync";
 const token = process.env.OBS_SYNC_TOKEN;

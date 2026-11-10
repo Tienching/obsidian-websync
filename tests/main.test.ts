@@ -61,7 +61,7 @@ describe("manual sync command", () => {
     finishScan();
     await scan;
 
-    expect(noticeMessages).toEqual(["WebSync sync complete"]);
+    expect(noticeMessages).toEqual(["WebSync local upload queue is empty; other devices may still be syncing"]);
   });
 
   it("shows a failure notice when the manual scan fails", async () => {

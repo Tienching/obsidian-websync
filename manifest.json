@@ -1,9 +1,9 @@
 {
   "id": "websync",
   "name": "WebSync",
-  "version": "0.1.13",
+  "version": "0.2.0-dev.1",
   "minAppVersion": "1.5.0",
-  "description": "Private realtime sync for Obsidian vaults.",
+  "description": "Isolated WebSync prototype; do not install in an active vault.",
   "author": "Jonaszchen",
   "authorUrl": "https://chatgpt.com",
   "isDesktopOnly": false

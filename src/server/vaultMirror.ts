@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { ManifestFileEntry, ManifestSnapshot, RemoteChangeMessage } from "../shared/protocol";
@@ -30,6 +30,7 @@ export class VaultMirror {
   private state: MirrorState = { knownFiles: {} };
   private readonly vaultPath: string;
   private readonly logger: Pick<Console, "log" | "warn" | "error">;
+  private applyQueue = Promise.resolve();
 
   constructor(private readonly options: VaultMirrorOptions) {
     this.vaultPath = path.resolve(options.vaultPath);
@@ -37,19 +38,27 @@ export class VaultMirror {
   }
 
   async applyManifest(manifest: ManifestSnapshot): Promise<void> {
-    await this.loadState();
-    const entries = Object.values(manifest.files).sort((a, b) => a.revision - b.revision || a.path.localeCompare(b.path));
-    for (const entry of entries) {
-      await this.applyEntry(entry);
-    }
-    await this.ensureDeclaredFolders();
-    await this.saveState();
+    return this.serialize(async () => {
+      await this.loadState();
+      const entries = Object.values(manifest.files).sort((a, b) => a.revision - b.revision || a.path.localeCompare(b.path));
+      for (const entry of entries) await this.applyEntry(entry);
+      await this.ensureDeclaredFolders();
+      await this.saveState();
+    });
   }
 
   async applyRemoteChange(message: RemoteChangeMessage): Promise<void> {
-    await this.loadState();
-    await this.applyEntry(message.entry, message.contentBase64 !== undefined ? Buffer.from(message.contentBase64, "base64") : undefined);
-    await this.saveState();
+    return this.serialize(async () => {
+      await this.loadState();
+      await this.applyEntry(message.entry, message.contentBase64 !== undefined ? Buffer.from(message.contentBase64, "base64") : undefined);
+      await this.saveState();
+    });
+  }
+
+  private serialize(operation: () => Promise<void>): Promise<void> {
+    const run = this.applyQueue.then(operation, operation);
+    this.applyQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private async applyEntry(entryInput: ManifestFileEntry, content?: Buffer): Promise<void> {
@@ -65,6 +74,7 @@ export class VaultMirror {
     }
 
     const body = content ?? await this.options.fetchFile(entry.path);
+    if (body.length !== entry.size || sha256(body) !== entry.hash) throw new Error(`Mirror content failed verification: ${entry.path}`);
     await this.writeLocalFile(entry, body);
     this.state.knownFiles[entry.path] = knownFromEntry(entry);
     if (entry.path === FOLDER_MANIFEST_PATH) {
@@ -84,9 +94,11 @@ export class VaultMirror {
       return;
     }
 
-    await this.preserveDirtyLocal(entry.path, entry.hash);
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, content);
+    if (localHash !== undefined) await this.moveToRecovery(entry.path);
+    // Exclusive creation refuses to overwrite a file recreated by another
+    // process after the old one was moved to recovery.
+    await writeFile(absolute, content, { flag: "wx", mode: 0o600 });
   }
 
   private async deleteLocalFile(entry: ManifestFileEntry): Promise<void> {
@@ -94,26 +106,15 @@ export class VaultMirror {
     if (!existsSync(absolute)) {
       return;
     }
-    await this.preserveDirtyLocal(entry.path);
-    await rm(absolute, { force: true });
+    await this.moveToRecovery(entry.path);
   }
 
-  private async preserveDirtyLocal(vaultFilePath: string, incomingHash?: string): Promise<void> {
+  private async moveToRecovery(vaultFilePath: string): Promise<void> {
     const absolute = this.toAbsolutePath(vaultFilePath);
-    const localHash = await hashFileIfExists(absolute);
-    if (!localHash || localHash === incomingHash) {
-      return;
-    }
-
-    const known = this.state.knownFiles[vaultFilePath];
-    if (known && !known.deleted && known.hash === localHash) {
-      return;
-    }
-
-    const conflictPath = path.join(this.options.conflictDir, timestamp(), vaultFilePath);
+    const conflictPath = path.join(this.options.conflictDir, `${timestamp()}-${randomUUID()}`, vaultFilePath);
     await mkdir(path.dirname(conflictPath), { recursive: true });
-    await copyFile(absolute, conflictPath);
-    this.logger.warn(`Preserved dirty mirror file before remote apply: ${vaultFilePath} -> ${conflictPath}`);
+    await rename(absolute, conflictPath);
+    this.logger.warn(`Preserved mirror file before remote apply: ${vaultFilePath} -> ${conflictPath}`);
   }
 
   private async ensureDeclaredFolders(): Promise<void> {
@@ -157,7 +158,9 @@ export class VaultMirror {
 
   private async saveState(): Promise<void> {
     await mkdir(path.dirname(this.options.statePath), { recursive: true });
-    await writeFile(this.options.statePath, `${JSON.stringify(this.state, null, 2)}\n`);
+    const temporary = `${this.options.statePath}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    await rename(temporary, this.options.statePath);
   }
 
   private toAbsolutePath(vaultFilePath: string): string {
@@ -180,8 +183,9 @@ function knownFromEntry(entry: ManifestFileEntry): MirrorFileState {
 async function hashFileIfExists(absolute: string): Promise<string | undefined> {
   try {
     return sha256(await readFile(absolute));
-  } catch {
-    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 }
 

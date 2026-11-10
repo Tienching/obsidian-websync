@@ -1,4 +1,5 @@
 import COS from "cos-nodejs-sdk-v5";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { normalizeVaultPath } from "../shared/pathRules";
 import { FileStore } from "./fileStore";
 
@@ -23,7 +24,52 @@ export class CosFileStore implements FileStore {
   }
 
   async putFile(path: string, content: Buffer): Promise<void> {
-    await this.putObject(this.fileKey(path), content);
+    await this.putContentObject(this.fileKey(path), content);
+  }
+
+  async putBlob(hash: string, content: Buffer): Promise<void> {
+    await this.putContentObject(this.blobKey(hash), content);
+  }
+
+  async getBlob(hash: string): Promise<Buffer | undefined> {
+    return this.getObject(this.blobKey(hash));
+  }
+
+  async getBlobRange(hash: string, offset: number, length: number): Promise<Buffer | undefined> {
+    return this.getObject(this.blobKey(hash), { offset, length });
+  }
+
+  async getFileRange(path: string, offset: number, length: number): Promise<Buffer | undefined> {
+    return this.getObject(this.fileKey(path), { offset, length });
+  }
+
+  private async putContentObject(key: string, content: Buffer): Promise<void> {
+    if (content.length <= 1024 * 1024) {
+      await this.putObject(key, content);
+      return;
+    }
+    const uploadId = await new Promise<string>((resolve, reject) => {
+      this.cos.multipartInit({ Bucket: this.options.bucket, Region: this.options.region, Key: key }, (error, data) => error ? reject(error) : resolve(data.UploadId));
+    });
+    try {
+      const parts: Array<{ PartNumber: number; ETag: string }> = [];
+      for (let offset = 0; offset < content.length; offset += 1024 * 1024) {
+        const body = content.subarray(offset, offset + 1024 * 1024);
+        const partNumber = parts.length + 1;
+        const etag = await new Promise<string>((resolve, reject) => {
+          this.cos.multipartUpload({ Bucket: this.options.bucket, Region: this.options.region, Key: key, UploadId: uploadId, PartNumber: partNumber, Body: body, ContentLength: body.length }, (error, data) => error ? reject(error) : resolve(data.ETag));
+        });
+        parts.push({ PartNumber: partNumber, ETag: etag });
+      }
+      await new Promise<void>((resolve, reject) => {
+        this.cos.multipartComplete({ Bucket: this.options.bucket, Region: this.options.region, Key: key, UploadId: uploadId, Parts: parts }, (error) => error ? reject(error) : resolve());
+      });
+    } catch (error) {
+      await new Promise<void>((resolve) => {
+        this.cos.multipartAbort({ Bucket: this.options.bucket, Region: this.options.region, Key: key, UploadId: uploadId }, () => resolve());
+      });
+      throw error;
+    }
   }
 
   async getFile(path: string): Promise<Buffer | undefined> {
@@ -50,29 +96,36 @@ export class CosFileStore implements FileStore {
   }
 
   async putManifest(content: Buffer): Promise<void> {
-    await this.putObject(this.manifestKey(), content);
+    await this.putObject(this.manifestKey(), gzipSync(content), true);
   }
 
   async getManifest(): Promise<Buffer | undefined> {
-    return this.getObject(this.manifestKey());
+    const body = await this.getObject(this.manifestKey());
+    return body && body[0] === 0x1f && body[1] === 0x8b ? gunzipSync(body) : body;
   }
 
   private fileKey(path: string): string {
     return `${this.prefix}/files/${normalizeVaultPath(path)}`;
   }
 
+  private blobKey(hash: string): string {
+    if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid blob hash");
+    return `${this.prefix}/blobs/sha256/${hash}`;
+  }
+
   private manifestKey(): string {
     return `${this.prefix}/meta/manifest.json`;
   }
 
-  private async putObject(key: string, content: Buffer): Promise<void> {
+  private async putObject(key: string, content: Buffer, compressedManifest = false): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       this.cos.putObject(
         {
           Bucket: this.options.bucket,
           Region: this.options.region,
           Key: key,
-          Body: content
+          Body: content,
+          ...(compressedManifest ? { ContentEncoding: "gzip", ContentType: "application/json" } : {})
         },
         (error) => {
           if (error) {
@@ -85,13 +138,14 @@ export class CosFileStore implements FileStore {
     });
   }
 
-  private async getObject(key: string): Promise<Buffer | undefined> {
+  private async getObject(key: string, range?: { offset: number; length: number }): Promise<Buffer | undefined> {
     return new Promise<Buffer | undefined>((resolve, reject) => {
       this.cos.getObject(
         {
           Bucket: this.options.bucket,
           Region: this.options.region,
-          Key: key
+          Key: key,
+          ...(range ? { Range: `bytes=${range.offset}-${range.offset + range.length - 1}` } : {})
         },
         (error, data) => {
           if (error) {

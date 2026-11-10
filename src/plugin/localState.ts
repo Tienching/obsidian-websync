@@ -8,6 +8,8 @@ export interface PendingOperation {
   createdAt: number;
   baseContentBase64?: string;
   folderManifestBaseFolders?: string[];
+  blockedReason?: "remote-deletion" | "local-file-missing" | "server-rejected" | "merge-conflict" | "upgrade-required";
+  blockedRevision?: number;
 }
 
 export interface KnownFileState {
@@ -53,19 +55,20 @@ export function createOpId(deviceId: string): string {
 export function loadLocalState(vaultId: string): LocalSyncState {
   const key = stateStorageKey(vaultId);
   const stored = readLocalStorage(key);
-  if (stored) {
+  if (stored !== null) {
     try {
       const parsed = JSON.parse(stored) as Partial<LocalSyncState>;
-      if (parsed.deviceId) {
+      if (typeof parsed.deviceId === "string" && parsed.deviceId
+        && (parsed.knownFiles === undefined || (typeof parsed.knownFiles === "object" && parsed.knownFiles !== null && !Array.isArray(parsed.knownFiles)))
+        && (parsed.pendingOps === undefined || Array.isArray(parsed.pendingOps))) {
         return {
           deviceId: parsed.deviceId,
           knownFiles: parsed.knownFiles ?? {},
           pendingOps: parsed.pendingOps ?? []
         };
       }
-    } catch {
-      // Fall through to a fresh per-device state.
-    }
+    } catch { /* Preserve the original storage entry for recovery. */ }
+    throw new Error("WebSync local state is damaged; synchronization is paused to protect pending edits");
   }
   const state = createEmptyState();
   saveLocalState(vaultId, state);
@@ -73,7 +76,35 @@ export function loadLocalState(vaultId: string): LocalSyncState {
 }
 
 export function saveLocalState(vaultId: string, state: LocalSyncState): void {
-  writeLocalStorage(stateStorageKey(vaultId), JSON.stringify(state));
+  const key = stateStorageKey(vaultId);
+  if (!writeLocalStorage(key, JSON.stringify(compactStateForStorage(state, 512_000)))
+      && !writeLocalStorage(key, JSON.stringify(compactStateForStorage(state, 0)))) {
+    throw new Error("WebSync could not persist its pending queue; local files have not been removed");
+  }
+}
+
+function compactStateForStorage(state: LocalSyncState, cacheBudget: number): LocalSyncState {
+  const pendingOps = state.pendingOps.map((op) => {
+    const copy = { ...op };
+    const base = copy.baseContentBase64;
+    delete copy.baseContentBase64;
+    if (typeof base === "string" && base.length <= cacheBudget) {
+      copy.baseContentBase64 = base;
+      cacheBudget -= base.length;
+    }
+    return copy;
+  });
+  const knownFiles = Object.fromEntries(Object.entries(state.knownFiles).map(([path, entry]) => {
+    const copy = { ...entry };
+    const content = copy.contentBase64;
+    delete copy.contentBase64;
+    if (typeof content === "string" && content.length <= cacheBudget) {
+      copy.contentBase64 = content;
+      cacheBudget -= content.length;
+    }
+    return [path, copy];
+  }));
+  return { ...state, pendingOps, knownFiles };
 }
 
 function stateStorageKey(vaultId: string): string {
@@ -82,18 +113,23 @@ function stateStorageKey(vaultId: string): string {
 
 function readLocalStorage(key: string): string | null {
   try {
-    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+    if (typeof localStorage === "undefined") throw new Error("Local storage is unavailable");
+    return localStorage.getItem(key);
   } catch {
-    return null;
+    // Failure to read is not the same as an absent queue. Do not generate a
+    // new identity or overwrite state whose contents could not be inspected.
+    throw new Error("WebSync cannot read local state; synchronization is paused to protect pending edits");
   }
 }
 
-function writeLocalStorage(key: string, value: string): void {
+function writeLocalStorage(key: string, value: string): boolean {
   try {
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(key, value);
+      return true;
     }
   } catch {
-    // Obsidian can still run with in-memory state if storage is unavailable.
+    // Retry with smaller caches; never silently discard the pending queue.
   }
+  return false;
 }

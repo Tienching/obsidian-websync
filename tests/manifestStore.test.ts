@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ManifestStore } from "../src/server/manifestStore";
 import { MemoryFileStore } from "../src/server/fileStore";
 
@@ -16,6 +16,122 @@ afterEach(async () => {
 });
 
 describe("ManifestStore", () => {
+  it("does not resurrect an explicitly withdrawn item even when a client knows its tombstone revision", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const put = { opId: "first", deviceId: "mac", path: "withdrawn-note.md", content: Buffer.from("old"),
+      hash: "hash-old", size: 3, baseRevision: 0, deviceName: "Mac", mtime: 1 };
+    const created = await store.applyPut(put);
+    if (created.kind !== "accepted") throw new Error("expected created");
+    const deleted = await store.applyDelete({ opId: "delete", path: put.path, baseRevision: created.entry.revision, deviceId: "mac", deviceName: "Mac" });
+    if (deleted.kind !== "deleted") throw new Error("expected deleted");
+    (store as any).manifest.files[put.path].withdrawnBatch = "synthetic-withdrawal-batch";
+    const revision = store.snapshot().revision;
+    const result = await store.applyPut({ ...put, opId: "restore", deviceId: "phone", baseRevision: deleted.entry.revision });
+    expect(result.kind).toBe("stale");
+    expect(store.snapshot().revision).toBe(revision);
+    expect(store.snapshot().files[put.path].deleted).toBe(true);
+  });
+  it("replays a lost acknowledgement without generating duplicate conflict files, including after restart", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const put = (opId: string, deviceId: string, text: string) => ({ opId, deviceId, path: "image.bin", content: Buffer.from(text),
+      hash: `hash-${text}`, size: Buffer.byteLength(text), baseRevision: 0, deviceName: deviceId, mtime: 1 });
+    await store.applyPut(put("first", "mac", "base"));
+    const operation = put("offline", "phone", "other");
+    const conflict = await store.applyPut(operation);
+    if (conflict.kind !== "conflict") throw new Error("expected conflict");
+    const revision = store.snapshot().revision;
+    const replay = await store.applyPut(operation);
+    expect(replay).toMatchObject({ kind: "conflict", replayed: true, entry: { path: conflict.entry.path } });
+    expect(store.snapshot().revision).toBe(revision);
+    const reopened = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    expect(await reopened.applyPut(operation)).toMatchObject({ kind: "conflict", replayed: true, entry: { path: conflict.entry.path } });
+    expect(Object.keys(reopened.snapshot().files)).toHaveLength(2);
+    expect((await reopened.applyPut({ ...operation, hash: "different", content: Buffer.from("changed"), size: 7 })).kind).toBe("ignored");
+  });
+
+  it("keeps the old committed version when the cloud manifest write fails", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const make = (id: string, text: string, baseRevision: number) => ({ opId: id, path: "note.md", content: Buffer.from(text),
+      hash: `hash-${text}`, size: Buffer.byteLength(text), baseRevision, deviceId: "mac", deviceName: "Mac", mtime: 1 });
+    const base = await store.applyPut(make("one", "base", 0));
+    if (base.kind !== "accepted") throw new Error("expected base");
+    const fail = vi.spyOn(fileStore, "putManifest").mockRejectedValueOnce(new Error("offline"));
+    await expect(store.applyPut(make("two", "new", base.entry.revision))).rejects.toThrow("offline");
+    expect(store.snapshot().files["note.md"].hash).toBe("hash-base");
+    expect((await fileStore.getBlob("hash-base"))?.toString()).toBe("base");
+    expect(JSON.parse((await fileStore.getManifest())!.toString()).files["note.md"].hash).toBe("hash-base");
+    fail.mockRestore();
+    const retry = await store.applyPut(make("two", "new", base.entry.revision));
+    expect(retry.kind).toBe("accepted");
+    expect(JSON.parse((await fileStore.getManifest())!.toString()).files["note.md"].hash).toBe("hash-new");
+  });
+
+  it("recognizes a committed cloud manifest even when its acknowledgement is lost", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const original = fileStore.putManifest.bind(fileStore);
+    vi.spyOn(fileStore, "putManifest").mockImplementationOnce(async (body) => { await original(body); throw new Error("lost ACK"); });
+    const result = await store.applyPut({ opId: "one", path: "note.md", content: Buffer.from("content"), hash: "hash-content", size: 7,
+      baseRevision: 0, deviceId: "mac", deviceName: "Mac", mtime: 1 });
+    expect(result.kind).toBe("accepted");
+    const reopened = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    expect(reopened.snapshot().files["note.md"].hash).toBe("hash-content");
+    expect(await reopened.readOperationLog()).toMatchObject([{ revision: 1, opId: "one" }]);
+  });
+
+  it("pauses snapshots and later retries when the outcome cannot be determined", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    vi.spyOn(fileStore, "putManifest").mockRejectedValueOnce(new Error("write timeout"));
+    vi.spyOn(fileStore, "getManifest").mockRejectedValueOnce(new Error("read timeout"));
+    const edit = { opId: "one", path: "note.md", content: Buffer.from("content"), hash: "hash-content", size: 7,
+      baseRevision: 0, deviceId: "mac", deviceName: "Mac", mtime: 1 };
+    await expect(store.applyPut(edit)).rejects.toThrow("read timeout");
+    expect(() => store.snapshot()).toThrow("uncertain");
+    const retry = await store.applyPut(edit);
+    expect(retry.kind).toBe("accepted");
+    expect(store.snapshot().files["note.md"].hash).toBe("hash-content");
+  });
+
+  it("recovers a remotely committed revision after a crash before the local checkpoint", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const base = await store.applyPut({ opId: "one", path: "note.md", content: Buffer.from("base"), hash: "hash-base", size: 4,
+      baseRevision: 0, deviceId: "mac", deviceName: "Mac", mtime: 1 });
+    if (base.kind !== "accepted") throw new Error("expected base");
+    const manifest = store.snapshot();
+    const next = { ...base.entry, revision: 2, hash: "hash-next", blobHash: "hash-next" };
+    await fileStore.putBlob("hash-next", Buffer.from("next"));
+    manifest.revision = 2;
+    manifest.files["note.md"] = next;
+    manifest.lastOperation = { revision: 2, action: "put", path: "note.md", deviceId: "mac", deviceName: "Mac", timestamp: "2026-11-09T00:00:00Z", opId: "two" };
+    await fileStore.putManifest(Buffer.from(JSON.stringify(manifest)));
+    const reopened = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    expect(reopened.snapshot().revision).toBe(2);
+    expect((await fileStore.getBlob("hash-next"))?.toString()).toBe("next");
+    expect(await reopened.readOperationLog()).toMatchObject([{ revision: 1 }, { revision: 2, opId: "two" }]);
+  });
+
+  it("does not let a delayed same-device edit overwrite a newer version", async () => {
+    const fileStore = new MemoryFileStore();
+    const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore });
+    const make = (opId: string, text: string, baseRevision: number) => ({
+      opId, path: "note.md", content: Buffer.from(text), hash: `hash-${text}`,
+      size: Buffer.byteLength(text), baseRevision, deviceId: "mac", deviceName: "Mac", mtime: 1
+    });
+    const first = await store.applyPut(make("one", "base", 0));
+    if (first.kind !== "accepted") throw new Error("expected base version");
+    const second = await store.applyPut(make("two", "newer", first.entry.revision));
+    if (second.kind !== "accepted") throw new Error("expected newer version");
+    const delayed = await store.applyPut(make("three", "older", first.entry.revision));
+    expect(delayed.kind).toBe("stale");
+    expect((await fileStore.getBlob("hash-newer"))?.toString()).toBe("newer");
+    expect(store.snapshot().files["note.md"].revision).toBe(second.entry.revision);
+  });
+
   it("accepts first put and increments revision", async () => {
     const store = await ManifestStore.open({ dataDir: dir, vaultId: "vault", fileStore: new MemoryFileStore() });
 

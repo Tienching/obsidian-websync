@@ -65,6 +65,7 @@ async function runMirrorSession(config: MirrorConfig, mirror: VaultMirror): Prom
       .then(() => mirror.applyRemoteChange(message))
       .catch((error) => {
         console.error(`mirror apply failed for ${message.entry.path}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+        socket.close(1011, "Mirror apply failed; retrying");
       });
   };
 
@@ -132,7 +133,8 @@ async function fetchManifest(config: MirrorConfig): Promise<ManifestSnapshot> {
   const files: ManifestSnapshot["files"] = {};
 
   while (true) {
-    const response = await fetch(`${config.httpBaseUrl}/manifest-page?offset=${offset}&limit=200`, {
+    const pin = revision === undefined ? "" : `&revision=${revision}`;
+    const response = await fetch(`${config.httpBaseUrl}/manifest-page?offset=${offset}&limit=100${pin}`, {
       headers: authHeaders(config)
     });
     if (!response.ok) {

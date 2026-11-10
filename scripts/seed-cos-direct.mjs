@@ -5,6 +5,11 @@ import { readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 
+// This historical script replaces an entire remote manifest and can wipe a
+// prefix. Keep it disabled until initialization, locking, migration and
+// recovery are designed and verified for schema 2.
+throw new Error("Direct COS seeding is disabled in this development prototype to protect existing data");
+
 const vault = process.env.OBSIDIAN_VAULT_PATH ?? join(homedir(), "Documents", "Obsidian");
 const bucket = required("COS_BUCKET");
 const region = required("COS_REGION");

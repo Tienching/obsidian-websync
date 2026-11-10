@@ -3,11 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { MemoryFileStore } from "../src/server/fileStore";
 import { ManifestStore } from "../src/server/manifestStore";
 import { SyncHub } from "../src/server/syncHub";
+import { createByteDelta } from "../src/shared/byteDelta";
 
 const hubs: SyncHub[] = [];
 const tempDirs: string[] = [];
@@ -18,6 +19,105 @@ afterEach(async () => {
 });
 
 describe("SyncHub", () => {
+  it("serves a stable paginated snapshot while newer files are committed", async () => {
+    const { baseUrl, store } = await startHub();
+    for (let n = 0; n < 3; n += 1) {
+      await store.applyPut({ opId: `seed-${n}`, path: `note-${n}.md`, content: Buffer.from(`${n}`), hash: `hash-${n}`, size: 1,
+        baseRevision: 0, deviceId: "seed", deviceName: "Seed", mtime: 1 });
+    }
+    const auth = { headers: { Authorization: "Bearer secret" } };
+    const first = await (await fetch(`${baseUrl}/manifest-page?offset=0&limit=1`, auth)).json() as any;
+    expect(first).toMatchObject({ revision: 3, totalFiles: 3, nextOffset: 1 });
+    await store.applyPut({ opId: "later", path: "later.md", content: Buffer.from("x"), hash: "hash-later", size: 1,
+      baseRevision: 0, deviceId: "seed", deviceName: "Seed", mtime: 1 });
+    const pinned = await (await fetch(`${baseUrl}/manifest-page?offset=1&limit=1&revision=3`, auth)).json() as any;
+    expect(pinned).toMatchObject({ revision: 3, totalFiles: 3, nextOffset: 2 });
+    expect(Object.keys(pinned.files)).toEqual(["note-1.md"]);
+    expect((await fetch(`${baseUrl}/manifest-page?offset=0&limit=1&revision=999`, auth)).status).toBe(409);
+  });
+
+  it("accepts a verified delta and broadcasts full content to a legacy client", async () => {
+    const { wsUrl, store } = await startHub();
+    const base = Buffer.from("前文".repeat(300) + "原文" + "尾部".repeat(300));
+    const next = Buffer.from("前文".repeat(300) + "新文😀" + "尾部".repeat(300));
+    const hash = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
+    const first = await store.applyPut({ opId: "seed", path: "note.md", content: base, hash: hash(base), size: base.length,
+      baseRevision: 0, deviceId: "seed", deviceName: "Seed", mtime: 1 });
+    if (first.kind !== "accepted") throw new Error("expected seed");
+    const sender = await openAuthedSocket(wsUrl, "new-client");
+    const legacy = await openAuthedSocket(wsUrl, "legacy-client");
+    const ack = nextMessage(sender);
+    const broadcast = nextMessage(legacy);
+    const delta = createByteDelta(base, next);
+    const message = { type: "put-delta", opId: "patch-1", path: "note.md", baseRevision: first.entry.revision,
+      baseHash: hash(base), prefixLength: delta.prefixLength, suffixLength: delta.suffixLength,
+      middleBase64: Buffer.from(delta.middle).toString("base64"), hash: hash(next), size: next.length, mtime: 2 };
+    sender.send(JSON.stringify(message));
+    const accepted = await ack;
+    expect(accepted.status).toBe("accepted");
+    const remote = await broadcast;
+    expect(remote.type).toBe("remote-change");
+    expect(Buffer.from(remote.contentBase64, "base64")).toEqual(next);
+    expect((await store.readEntryContent(store.snapshot().files["note.md"]))?.equals(next)).toBe(true);
+    const repeatedAck = nextMessage(sender);
+    sender.send(JSON.stringify(message));
+    expect(await repeatedAck).toMatchObject({ status: "accepted", entry: { revision: accepted.entry.revision } });
+    expect(store.snapshot().revision).toBe(accepted.entry.revision);
+    sender.close();
+    legacy.close();
+  });
+
+  it("rejects a corrupt delta without changing the committed file", async () => {
+    const { wsUrl, store } = await startHub();
+    const base = Buffer.from("base");
+    const hash = createHash("sha256").update(base).digest("hex");
+    const first = await store.applyPut({ opId: "seed", path: "note.md", content: base, hash, size: base.length,
+      baseRevision: 0, deviceId: "seed", deviceName: "Seed", mtime: 1 });
+    if (first.kind !== "accepted") throw new Error("expected seed");
+    const socket = await openAuthedSocket(wsUrl);
+    const ack = nextMessage(socket);
+    socket.send(JSON.stringify({ type: "put-delta", opId: "bad", path: "note.md", baseRevision: first.entry.revision, baseHash: hash,
+      prefixLength: 0, suffixLength: 0, middleBase64: Buffer.from("evil").toString("base64"), hash, size: 4, mtime: 2 }));
+    expect((await ack).status).toBe("ignored");
+    expect(store.snapshot().files["note.md"].revision).toBe(first.entry.revision);
+    expect((await store.readEntryContent(first.entry))?.equals(base)).toBe(true);
+    socket.close();
+  });
+
+  it("downloads only the requested byte range and rejects changed content", async () => {
+    const { baseUrl, store, fileStore } = await startHub();
+    const content = Buffer.from("0123456789");
+    const hash = createHash("sha256").update(content).digest("hex");
+    await store.applyPut({ opId: "seed", path: "note.md", content, hash, size: content.length,
+      baseRevision: 0, deviceId: "mac", deviceName: "Mac", mtime: 1 });
+    const fullRead = vi.spyOn(fileStore, "getBlob");
+    const rangeRead = vi.spyOn(fileStore, "getBlobRange");
+    const auth = { headers: { Authorization: "Bearer secret" } };
+    const response = await fetch(`${baseUrl}/file-chunk?path=note.md&offset=2&length=3&hash=${hash}`, auth);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("234");
+    expect(response.headers.get("x-obsidian-sync-next-offset")).toBe("5");
+    expect(response.headers.get("x-obsidian-sync-hash")).toBe(hash);
+    expect(fullRead).not.toHaveBeenCalled();
+    expect(rangeRead).toHaveBeenCalledWith(hash, 2, 3);
+    expect((await fetch(`${baseUrl}/file-chunk?path=note.md&offset=2&length=3&hash=old`, auth)).status).toBe(409);
+    expect((await fetch(`${baseUrl}/file-chunk?path=note.md&offset=-1&length=3`, auth)).status).toBe(416);
+  });
+
+  it("returns a safe HTTP error when object storage rejects a read", async () => {
+    const { baseUrl, store, fileStore } = await startHub();
+    await store.applyPut({ opId: "seed", path: "note.md", content: Buffer.from("x"), hash: "hash-x", size: 1,
+      baseRevision: 0, deviceId: "mac", deviceName: "Mac", mtime: 1 });
+    vi.spyOn(fileStore, "getBlob").mockRejectedValue({ sensitive: "not returned" });
+    vi.spyOn(fileStore, "getBlobRange").mockRejectedValue({ sensitive: "not returned" });
+    for (const endpoint of ["/file?path=note.md", "/file-chunk?path=note.md&offset=0&length=1"]) {
+      const response = await fetch(`${baseUrl}${endpoint}`, { headers: { Authorization: "Bearer secret" } });
+      expect(response.status).toBe(500);
+      expect(await response.text()).not.toContain("sensitive");
+    }
+    expect((await fetch(`${baseUrl}/healthz`)).status).toBe(200);
+  });
+
   it("requires bearer auth for HTTP manifest pages and rejects query tokens", async () => {
     const { baseUrl } = await startHub();
 
@@ -176,6 +276,7 @@ async function startHub(options: { proxyTarget?: string; vaultAliases?: string[]
   baseUrl: string;
   port: number;
   store: ManifestStore;
+  fileStore: MemoryFileStore;
   wsUrl: string;
 }> {
   const fileStore = new MemoryFileStore();
@@ -197,6 +298,7 @@ async function startHub(options: { proxyTarget?: string; vaultAliases?: string[]
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     store,
+    fileStore,
     wsUrl: `ws://127.0.0.1:${port}/sync`
   };
 }
@@ -207,7 +309,7 @@ async function makeTempDir(): Promise<string> {
   return dir;
 }
 
-async function openAuthedSocket(wsUrl: string): Promise<WebSocket> {
+async function openAuthedSocket(wsUrl: string, deviceId = "device-a"): Promise<WebSocket> {
   const socket = new WebSocket(wsUrl);
   await new Promise<void>((resolve, reject) => {
     socket.on("open", resolve);
@@ -218,7 +320,7 @@ async function openAuthedSocket(wsUrl: string): Promise<WebSocket> {
       type: "hello",
       protocolVersion: 1,
       vaultId: "vault",
-      deviceId: "device-a",
+      deviceId,
       deviceName: "Device A",
       token: "secret"
     })

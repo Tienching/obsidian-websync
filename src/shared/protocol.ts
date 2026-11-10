@@ -9,12 +9,16 @@ export interface ManifestFileEntry {
   updatedAt: string;
   updatedBy: string;
   deleted?: boolean;
+  /** Immutable content object. Absent for legacy path-addressed entries. */
+  blobHash?: string;
 }
 
 export interface ManifestSnapshot {
   vaultId: string;
   revision: number;
   files: Record<string, ManifestFileEntry>;
+  storageSchema?: 2;
+  lastOperation?: OperationLogEntry;
 }
 
 export type OperationLogAction = "put" | "delete" | "conflict";
@@ -29,6 +33,13 @@ export interface OperationLogEntry {
   hash?: string;
   size?: number;
   canonicalPath?: string;
+  opId?: string;
+  receipt?: {
+    fingerprint: string;
+    kind: "accepted" | "conflict" | "deleted";
+    entry: ManifestFileEntry;
+    canonicalEntry?: ManifestFileEntry;
+  };
 }
 
 export interface HelloMessage {
@@ -64,6 +75,7 @@ export interface SnapshotEndMessage {
 export interface ReadyMessage {
   type: "ready";
   revision: number;
+  capabilities?: string[];
 }
 
 export interface PutMessage {
@@ -75,6 +87,20 @@ export interface PutMessage {
   size: number;
   mtime: number;
   contentBase64: string;
+}
+
+export interface PutDeltaMessage {
+  type: "put-delta";
+  opId: string;
+  path: string;
+  baseRevision: number;
+  baseHash: string;
+  prefixLength: number;
+  suffixLength: number;
+  middleBase64: string;
+  hash: string;
+  size: number;
+  mtime: number;
 }
 
 export interface DeleteMessage {
@@ -141,7 +167,7 @@ export interface ErrorMessage {
   message: string;
 }
 
-export type ClientMessage = HelloMessage | PutMessage | DeleteMessage | PullMessage;
+export type ClientMessage = HelloMessage | PutMessage | PutDeltaMessage | DeleteMessage | PullMessage;
 export type ServerMessage =
   | SnapshotMessage
   | SnapshotStartMessage

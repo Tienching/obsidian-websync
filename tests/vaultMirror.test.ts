@@ -24,6 +24,37 @@ afterEach(async () => {
 });
 
 describe("VaultMirror", () => {
+  it("rejects corrupted incoming bytes before touching the mirror file", async () => {
+    await writeFile(join(vaultDir, "note.md"), "local original");
+    const mirror = new VaultMirror({ vaultPath: vaultDir, statePath, conflictDir, fetchFile: async () => Buffer.from("wrong"), logger: quietLogger() });
+    await expect(mirror.applyManifest({ vaultId: "vault", revision: 1,
+      files: { "note.md": entry("note.md", 1, Buffer.from("right")) } })).rejects.toThrow("failed verification");
+    await expect(readFile(join(vaultDir, "note.md"), "utf8")).resolves.toBe("local original");
+  });
+
+  it("serializes overlapping mirror changes and retains their previous versions", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const begin = new Promise<void>((resolve) => { started = resolve; });
+    let fetchCount = 0;
+    const mirror = new VaultMirror({ vaultPath: vaultDir, statePath, conflictDir, fetchFile: async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) return Buffer.from("base");
+      started(); await gate; return Buffer.from("older");
+    }, logger: quietLogger() });
+    await mirror.applyManifest({ vaultId: "vault", revision: 1, files: { "note.md": entry("note.md", 1, Buffer.from("base")) } });
+    const old = mirror.applyRemoteChange({ type: "remote-change", originDeviceId: "a", action: "put", entry: entry("note.md", 2, Buffer.from("older")) });
+    await begin;
+    const newer = mirror.applyRemoteChange({ type: "remote-change", originDeviceId: "b", action: "put", entry: entry("note.md", 3, Buffer.from("newer")),
+      contentBase64: Buffer.from("newer").toString("base64") });
+    release(); await Promise.all([old, newer]);
+    await expect(readFile(join(vaultDir, "note.md"), "utf8")).resolves.toBe("newer");
+    const recovered = await listFiles(conflictDir);
+    const contents = await Promise.all(recovered.map((file) => readFile(file, "utf8")));
+    expect(contents.sort()).toEqual(["base", "older"]);
+  });
+
   it("applies a manifest to files and declared empty folders", async () => {
     await writeFile(join(vaultDir, "old.md"), "stale");
     const files = new Map([

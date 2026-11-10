@@ -31,6 +31,366 @@ describe("SyncEngine helpers", () => {
     vi.resetModules();
   });
 
+  it("holds incoming messages in order across asynchronous processing", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    class FakeSocket {
+      static OPEN = 1;
+      readyState = 1;
+      onmessage?: (event: {data: string}) => void;
+      constructor(_url: string) {}
+      close() {}
+      send(_message: string) {}
+    }
+    vi.stubGlobal("WebSocket", FakeSocket);
+    try {
+      const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+      const engine = new SyncEngine({ app: {} as any, getSettings: () => settings(), getState: () => state,
+        save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+      engine.connect();
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const order: string[] = [];
+      (engine as any).handleServerMessage = async ({ n }: {n: number}) => {
+        order.push(`start-${n}`);
+        if (n === 1) { markStarted(); await gate; }
+        order.push(`end-${n}`);
+      };
+      const socket = (engine as any).socket as FakeSocket;
+      socket.onmessage!({ data: JSON.stringify({ n: 1 }) });
+      await started;
+      socket.onmessage!({ data: JSON.stringify({ n: 2 }) });
+      await Promise.resolve();
+      expect(order).toEqual(["start-1"]);
+      release();
+      await (engine as any).incomingMessages;
+      expect(order).toEqual(["start-1", "end-1", "start-2", "end-2"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("fetches a large pinned manifest with bounded parallel pages", async () => {
+    const { requestUrl } = await import("obsidian");
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const entries = Object.fromEntries(Array.from({ length: 350 }, (_, n) => [`note-${n}.md`, entry(`note-${n}.md`)]));
+    let active = 0;
+    let maxActive = 0;
+    const offsets: number[] = [];
+    vi.mocked(requestUrl).mockImplementation((async (request: any) => {
+      const url = new URL(request.url);
+      const offset = Number(url.searchParams.get("offset"));
+      const limit = Number(url.searchParams.get("limit"));
+      if (offset > 0) expect(url.searchParams.get("revision")).toBe("7");
+      offsets.push(offset);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      const page = Object.entries(entries).slice(offset, offset + limit);
+      return { status: 200, json: { vaultId: "vault", revision: 7, totalFiles: 350,
+        nextOffset: offset + page.length < 350 ? offset + page.length : null, files: Object.fromEntries(page) } } as any;
+    }) as any);
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const engine = new SyncEngine({ app: {} as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    const manifest = await (engine as any).fetchManifest();
+    expect(Object.keys(manifest.files)).toHaveLength(350);
+    expect(offsets.sort((a, b) => a - b)).toEqual([0, 100, 200, 300]);
+    expect(maxActive).toBeGreaterThan(1);
+    expect(maxActive).toBeLessThanOrEqual(4);
+    vi.mocked(requestUrl).mockReset();
+  });
+
+  it("keeps and blocks an unsent local edit when a remote deletion arrives", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("unsent local edit") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("old")), revision: 1 } },
+      pendingOps: [{ opId: "pending", type: "put", path: "note.md", baseRevision: 1, createdAt: 1 }] };
+    const status = vi.fn();
+    const trash = vi.fn();
+    const engine = new SyncEngine({ app: { vault: { adapter, trash } } as any, getSettings: () => settings(),
+      getState: () => state, save: vi.fn(async () => undefined), setStatus: status, registerEvent: vi.fn() });
+    const deleted = { ...entry("note.md"), revision: 2, deleted: true };
+    await (engine as any).applyRemoteChange({ type: "remote-change", action: "delete", entry: deleted });
+    expect(adapter.readUtf8("note.md")).toBe("unsent local edit");
+    expect(trash).not.toHaveBeenCalled();
+    expect(state.pendingOps).toMatchObject([{ opId: "pending", blockedReason: "remote-deletion", blockedRevision: 2 }]);
+    expect(state.knownFiles["note.md"].revision).toBe(1);
+    expect(status).toHaveBeenCalledWith("sync needs attention");
+    await (engine as any).handleAck({ opId: "pending", status: "stale", entry: deleted });
+    expect(state.pendingOps).toHaveLength(1);
+    expect(adapter.readUtf8("note.md")).toBe("unsent local edit");
+  });
+
+  it("does not apply an older incoming version over a known newer version", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("newer") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("newer")), revision: 3 } }, pendingOps: [] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    await (engine as any).applyRemoteChange({ type: "remote-change", action: "put", entry: { ...entry("note.md"), revision: 2 },
+      contentBase64: Buffer.from("older").toString("base64") });
+    expect(adapter.readUtf8("note.md")).toBe("newer");
+    expect(state.knownFiles["note.md"].revision).toBe(3);
+  });
+
+  it("rejects corrupted remote bytes before changing a local file", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("local") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("local")), revision: 1 } }, pendingOps: [] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    const remote = { ...entry("note.md"), hash: sha256Hex(Buffer.from("good")), size: 4, revision: 2 };
+    await expect((engine as any).applyRemoteChange({ type: "remote-change", action: "put", entry: remote,
+      contentBase64: Buffer.from("evil").toString("base64") })).rejects.toThrow("integrity verification");
+    expect(adapter.readUtf8("note.md")).toBe("local");
+    expect(state.knownFiles["note.md"].revision).toBe(1);
+  });
+
+  it("does not overwrite a Markdown edit that happens during remote application", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const { TFile } = await import("obsidian");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("base") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("base")), revision: 1 } }, pendingOps: [] };
+    const process = vi.fn(async (file: {path: string}, fn: (current: string) => string) => {
+      await adapter.writeBinary(file.path, toArrayBuffer(Buffer.from("latest local edit")));
+      const result = fn(adapter.readUtf8(file.path));
+      await adapter.writeBinary(file.path, toArrayBuffer(Buffer.from(result)));
+      return result;
+    });
+    const engine = new SyncEngine({ app: { vault: { adapter, process, getAbstractFileByPath: (path: string) => new (TFile as any)(path) } } as any,
+      getSettings: () => settings(), getState: () => state, save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    const remote = { ...entry("note.md"), hash: sha256Hex(Buffer.from("remote")), size: 6, revision: 2 };
+    await (engine as any).applyRemoteChange({ type: "remote-change", action: "put", entry: remote,
+      contentBase64: Buffer.from("remote").toString("base64") });
+    expect(process).toHaveBeenCalledOnce();
+    expect(adapter.readUtf8("note.md")).toBe("latest local edit");
+    expect(state.pendingOps).toMatchObject([{ path: "note.md", type: "put" }]);
+    expect(state.knownFiles["note.md"].revision).toBe(1);
+  });
+
+  it("rechecks an edit received during remote-event suppression", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("user changed it") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("remote")), revision: 2 } }, pendingOps: [] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    (engine as any).started = true;
+    await (engine as any).reconcileSuppressedEvent("note.md");
+    expect(state.pendingOps).toMatchObject([{ path: "note.md", type: "put", baseRevision: 2 }]);
+  });
+
+  it("rechecks suppressed local changes promptly without echoing unchanged remote content", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    try {
+      for (const changed of [false, true]) {
+        const adapter = new FakeAdapter({ "note.md": Buffer.from(changed ? "local change" : "remote") });
+        const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("remote")), revision: 2 } }, pendingOps: [] };
+        const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+          save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+        (engine as any).hashFile = async () => sha256Hex(Buffer.from(changed ? "local change" : "remote"));
+        (engine as any).started = true;
+        (engine as any).suppress("note.md");
+        (engine as any).schedulePut("note.md");
+        await vi.advanceTimersByTimeAsync(400);
+        expect(state.pendingOps.length).toBe(changed ? 1 : 0);
+        if (changed) expect(state.pendingOps[0]).toMatchObject({ path: "note.md", baseRevision: 2 });
+      }
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("waits for pending incoming changes before rechecking suppressed local events", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    try {
+      const adapter = new FakeAdapter({ "note.md": Buffer.from("new local edit") });
+      const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("old")), revision: 1 } }, pendingOps: [] };
+      const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+        save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+      (engine as any).hashFile = async () => sha256Hex(Buffer.from("new local edit"));
+      let finishIncoming!: () => void;
+      (engine as any).incomingMessages = new Promise<void>((resolve) => { finishIncoming = resolve; });
+      (engine as any).started = true;
+      (engine as any).suppress("note.md");
+      (engine as any).schedulePut("note.md");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(state.pendingOps).toHaveLength(0);
+      state.knownFiles["note.md"] = { hash: sha256Hex(Buffer.from("remote")), revision: 2 };
+      finishIncoming();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.pendingOps).toMatchObject([{ path: "note.md", baseRevision: 2 }]);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not echo a remote deletion, while retaining a real local deletion during suppression", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const { TFile } = await import("obsidian");
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    try {
+      for (const remoteDeleted of [true, false]) {
+        const adapter = new FakeAdapter({});
+        const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: "old", revision: 1 } }, pendingOps: [] };
+        const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+          save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+        let finishIncoming!: () => void;
+        (engine as any).incomingMessages = new Promise<void>((resolve) => { finishIncoming = resolve; });
+        (engine as any).started = true;
+        (engine as any).suppress("note.md");
+        (engine as any).handleLocalDelete(new (TFile as any)("note.md"));
+        await vi.advanceTimersByTimeAsync(400);
+        expect(state.pendingOps).toHaveLength(0);
+        state.knownFiles["note.md"] = { hash: "remote", revision: 2, ...(remoteDeleted ? { deleted: true } : {}) };
+        finishIncoming();
+        await vi.advanceTimersByTimeAsync(1);
+        if (remoteDeleted) expect(state.pendingOps).toEqual([]);
+        else expect(state.pendingOps).toMatchObject([{ path: "note.md", type: "delete", baseRevision: 2 }]);
+      }
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses the adapter's atomic text operation for hidden folder metadata", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = ".obsidian/websync-folders.json";
+    const old = Buffer.from('{"version":1,"folders":[]}');
+    const remote = Buffer.from('{"version":1,"folders":["New"]}');
+    const adapter = new FakeAdapter({ [path]: old });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { [path]: { hash: sha256Hex(old), revision: 1 } }, pendingOps: [] };
+    const engine = new SyncEngine({ app: { vault: { adapter, getAbstractFileByPath: () => null,
+      createFolder: async (folder: string) => { adapter.folders.add(folder); } } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    await (engine as any).applyRemoteChange({ type: "remote-change", action: "put", entry: { ...entry(path), hash: sha256Hex(remote),
+      size: remote.length, revision: 2 }, contentBase64: remote.toString("base64") });
+    expect(adapter.readUtf8(path)).toBe(remote.toString());
+    expect(await adapter.exists("New")).toBe(true);
+  });
+
+  it("does not automatically overwrite the running WebSync executable", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = ".obsidian/plugins/websync/main.js";
+    const old = Buffer.from("old code");
+    const remote = Buffer.from("different code");
+    const adapter = new FakeAdapter({ [path]: old });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { [path]: { hash: sha256Hex(old), revision: 1 } }, pendingOps: [] };
+    const engine = new SyncEngine({ app: { vault: { adapter, getAbstractFileByPath: () => null } } as any, getSettings: () => settings(),
+      getState: () => state, save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    await (engine as any).applyRemoteChange({ type: "remote-change", action: "put", entry: { ...entry(path), hash: sha256Hex(remote),
+      size: remote.length, revision: 2 }, contentBase64: remote.toString("base64") });
+    expect(adapter.readUtf8(path)).toBe("old code");
+    expect(state.pendingOps).toEqual([]);
+    expect(engine.getStatusSnapshot().status).toBe("sync needs attention");
+  });
+
+  it("does not discard a queued upload when the local file is missing", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({});
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {},
+      pendingOps: [{ opId: "pending", type: "put", path: "note.md", baseRevision: 1, createdAt: 1 }] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    await (engine as any).sendPut(state.pendingOps[0]);
+    expect(state.pendingOps).toMatchObject([{ opId: "pending", blockedReason: "local-file-missing" }]);
+  });
+
+  it("does not send a queued edit when persisting the queue fails", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("local") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const status = vi.fn();
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => { throw new Error("quota"); }), setStatus: status, registerEvent: vi.fn() });
+    const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    (engine as any).socket = socket;
+    (engine as any).queuePut("note.md");
+    await (engine as any).flushQueue();
+    expect(state.pendingOps).toHaveLength(1);
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith("sync needs attention");
+  });
+
+  it("drains 1,844 pending operations with bounded concurrency and no duplicate sends", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: Array.from({ length: 1844 }, (_, i) =>
+      ({ opId: `op-${i}`, type: "put" as const, path: `note-${i}.md`, baseRevision: 0, createdAt: i })) };
+    const engine = new SyncEngine({ app: {} as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    (engine as any).socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    const sent = new Set<string>();
+    let maxInflight = 0;
+    (engine as any).sendPut = async (op: LocalSyncState["pendingOps"][number]) => {
+      expect(sent.has(op.opId)).toBe(false);
+      sent.add(op.opId);
+      (engine as any).inflight.set(op.opId, { ...op, contentBase64: "" });
+      maxInflight = Math.max(maxInflight, (engine as any).inflight.size);
+    };
+    await Promise.all(Array.from({ length: 8 }, () => (engine as any).flushQueue()));
+    while ((engine as any).inflight.size) {
+      const op = [...(engine as any).inflight.values()][0] as LocalSyncState["pendingOps"][number];
+      await (engine as any).handleAck({ opId: op.opId, status: "accepted", entry: entry(op.path) });
+    }
+    expect(state.pendingOps).toEqual([]);
+    expect(sent.size).toBe(1844);
+    expect(maxInflight).toBeLessThanOrEqual(2);
+  });
+
+  it("sends a verified small delta only when the server advertises support", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const base = Buffer.from("中文😀".repeat(200) + "old" + "尾巴".repeat(200));
+    const next = Buffer.from("中文😀".repeat(200) + "new" + "尾巴".repeat(200));
+    for (const supportsDelta of [true, false]) {
+      const adapter = new FakeAdapter({ "note.md": next });
+      const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(base), revision: 1,
+        contentBase64: base.toString("base64") } }, pendingOps: [] };
+      const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+        save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+      const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+      (engine as any).socket = socket;
+      if (supportsDelta) (engine as any).serverCapabilities.add("put-delta-v1");
+      await (engine as any).sendPut({ opId: "one", path: "note.md", type: "put", baseRevision: 1, createdAt: 1 });
+      const sent = JSON.parse(socket.send.mock.calls[0][0]);
+      expect(sent.type).toBe(supportsDelta ? "put-delta" : "put");
+      if (supportsDelta) expect(Buffer.from(sent.middleBase64, "base64").length).toBeLessThan(20);
+      else expect(Buffer.from(sent.contentBase64, "base64")).toEqual(next);
+    }
+  });
+
+  it("waits for the previous upload of a path before sending its next edit", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const adapter = new FakeAdapter({ "note.md": Buffer.from("second") });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("base")), revision: 1 } },
+      pendingOps: [{ opId: "next", type: "put", path: "note.md", baseRevision: 1, createdAt: 2 }] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    const socket = { readyState: WebSocket.OPEN, send: vi.fn() };
+    (engine as any).socket = socket;
+    (engine as any).remoteManifest = { vaultId: "vault", revision: 1, files: {} };
+    (engine as any).inflight.set("old", { opId: "old", type: "put", path: "note.md", baseRevision: 1, createdAt: 1,
+      contentBase64: Buffer.from("first").toString("base64") });
+    await (engine as any).flushQueue();
+    expect(socket.send).not.toHaveBeenCalled();
+    const accepted = { ...entry("note.md"), hash: sha256Hex(Buffer.from("first")), size: 5, revision: 2 };
+    await (engine as any).handleAck({ opId: "old", status: "accepted", entry: accepted });
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(socket.send.mock.calls[0][0]);
+    expect(sent.opId).toBe("next");
+    expect(sent.baseRevision).toBe(2);
+    expect(Buffer.from(sent.contentBase64, "base64").toString()).toBe("second");
+  });
+
   it("decodes independently padded base64 chunks without truncating content", async () => {
     const { base64ChunksToArrayBuffer } = await import("../src/plugin/syncEngine");
     const chunks = [Buffer.alloc(8192, 1), Buffer.from("tail")];
@@ -74,7 +434,7 @@ describe("SyncEngine helpers", () => {
     expect(state.pendingOps[0].path).toBe(conflictPath);
   });
 
-  it("can replace stale local vault content from the remote manifest while preserving local-only plugins", async () => {
+  it("blocks replace-local and preserves existing notes, plugins, and pending operations", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
       "Cache 缓存收集/C1 临时收集/old.md": Buffer.from("old cache"),
@@ -108,11 +468,7 @@ describe("SyncEngine helpers", () => {
       registerEvent: vi.fn()
     });
 
-    await (
-      engine as unknown as {
-        replaceLocalWithRemoteManifest(manifest: ManifestSnapshot): Promise<void>;
-      }
-    ).replaceLocalWithRemoteManifest({
+    await expect((engine as any).reconcileSnapshot({
       vaultId: "vault",
       revision: 10,
       files: {
@@ -120,18 +476,18 @@ describe("SyncEngine helpers", () => {
         ".obsidian/community-plugins.json": entry(".obsidian/community-plugins.json"),
         ".obsidian/plugins/websync/main.js": entry(".obsidian/plugins/websync/main.js")
       }
-    });
+    })).rejects.toThrow("Replace local is disabled");
 
-    expect(await adapter.exists("Cache 缓存收集/C1 临时收集/old.md")).toBe(false);
-    expect(await adapter.exists("legacy-prefix/old.md")).toBe(false);
+    expect(await adapter.exists("Cache 缓存收集/C1 临时收集/old.md")).toBe(true);
+    expect(await adapter.exists("legacy-prefix/old.md")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/calendar/main.js")).toBe(true);
     expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
     expect(await adapter.exists("Memo 备忘记录/M1 生活记录/keep.md")).toBe(true);
-    expect(state.knownFiles).toEqual({});
-    expect(state.pendingOps).toEqual([]);
+    expect(state.knownFiles["Cache 缓存收集/C1 临时收集/old.md"].revision).toBe(1);
+    expect(state.pendingOps).toHaveLength(1);
   });
 
-  it("does not give Remotely Save bootstrap protection during replace local", async () => {
+  it("does not remove other plugins when replace-local is requested", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({
       ".obsidian/plugins/remotely-save/main.js": Buffer.from("old bootstrap helper"),
@@ -159,32 +515,29 @@ describe("SyncEngine helpers", () => {
       registerEvent: vi.fn()
     });
 
-    await (
-      engine as unknown as {
-        replaceLocalWithRemoteManifest(manifest: ManifestSnapshot): Promise<void>;
-      }
-    ).replaceLocalWithRemoteManifest({
+    await expect((engine as any).reconcileSnapshot({
       vaultId: "vault",
       revision: 10,
       files: {
         ".obsidian/plugins/websync/main.js": entry(".obsidian/plugins/websync/main.js")
       }
-    });
+    })).rejects.toThrow("Replace local is disabled");
 
     expect(await adapter.exists(".obsidian/plugins/websync/main.js")).toBe(true);
-    expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(false);
-    expect(await adapter.exists(".obsidian/plugins/remotely-save")).toBe(false);
+    expect(await adapter.exists(".obsidian/plugins/remotely-save/main.js")).toBe(true);
+    expect(await adapter.exists(".obsidian/plugins/remotely-save")).toBe(true);
   });
 
   it("deletes local files without pruning parent folders when a snapshot contains remote tombstones", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const { TFile } = await import("obsidian");
     const adapter = new FakeAdapter({
       "WIKI 知识网络/W1 索引地图/index.md": Buffer.from("old uppercase wiki")
     });
     const state: LocalSyncState = {
       deviceId: "device-a",
       knownFiles: {
-        "WIKI 知识网络/W1 索引地图/index.md": { hash: "old", revision: 1 }
+        "WIKI 知识网络/W1 索引地图/index.md": { hash: sha256Hex(Buffer.from("old uppercase wiki")), revision: 1 }
       },
       pendingOps: []
     };
@@ -192,6 +545,12 @@ describe("SyncEngine helpers", () => {
       app: {
         vault: {
           adapter,
+          getAbstractFileByPath: (path: string) => new (TFile as any)(path),
+          trash: async (file: {path: string}, system: boolean) => {
+            expect(system).toBe(false);
+            await adapter.writeBinary(`.trash/${file.path}`, await adapter.readBinary(file.path));
+            await adapter.remove(file.path);
+          },
           createFolder: async (path: string) => {
             adapter.folders.add(path);
           },
@@ -222,6 +581,7 @@ describe("SyncEngine helpers", () => {
     });
 
     expect(await adapter.exists("WIKI 知识网络/W1 索引地图/index.md")).toBe(false);
+    expect(adapter.readUtf8(".trash/WIKI 知识网络/W1 索引地图/index.md")).toBe("old uppercase wiki");
     expect(await adapter.exists("WIKI 知识网络/W1 索引地图")).toBe(true);
     expect(await adapter.exists("WIKI 知识网络")).toBe(true);
     expect(state.knownFiles["WIKI 知识网络/W1 索引地图/index.md"]).toEqual({
@@ -233,6 +593,7 @@ describe("SyncEngine helpers", () => {
 
   it("keeps an empty parent folder when a realtime file tombstone arrives", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const { TFile } = await import("obsidian");
     const adapter = new FakeAdapter({
       "Dash 操作中枢/D2 聚焦处理/Untitled.md": Buffer.from("scratch")
     });
@@ -241,7 +602,7 @@ describe("SyncEngine helpers", () => {
     const state: LocalSyncState = {
       deviceId: "device-a",
       knownFiles: {
-        "Dash 操作中枢/D2 聚焦处理/Untitled.md": { hash: "old", revision: 1 }
+        "Dash 操作中枢/D2 聚焦处理/Untitled.md": { hash: sha256Hex(Buffer.from("scratch")), revision: 1 }
       },
       pendingOps: []
     };
@@ -249,6 +610,11 @@ describe("SyncEngine helpers", () => {
       app: {
         vault: {
           adapter,
+          getAbstractFileByPath: (path: string) => new (TFile as any)(path),
+          trash: async (file: {path: string}) => {
+            await adapter.writeBinary(`.trash/${file.path}`, await adapter.readBinary(file.path));
+            await adapter.remove(file.path);
+          },
           createFolder: async (path: string) => {
             adapter.folders.add(path);
           },
@@ -283,6 +649,7 @@ describe("SyncEngine helpers", () => {
     });
 
     expect(await adapter.exists("Dash 操作中枢/D2 聚焦处理/Untitled.md")).toBe(false);
+    expect(adapter.readUtf8(".trash/Dash 操作中枢/D2 聚焦处理/Untitled.md")).toBe("scratch");
     expect(await adapter.exists("Dash 操作中枢/D2 聚焦处理")).toBe(true);
   });
 
@@ -539,7 +906,7 @@ describe("SyncEngine helpers", () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const adapter = new FakeAdapter({ "note.md": Buffer.from("old") });
     const emptyHash = sha256Hex(Buffer.alloc(0));
-    const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { "note.md": { hash: sha256Hex(Buffer.from("old")), revision: 1 } }, pendingOps: [] };
     const engine = new SyncEngine({
       app: {
         vault: {
@@ -661,7 +1028,7 @@ describe("SyncEngine helpers", () => {
       type: "remote-change",
       action: "put",
       originDeviceId: "phone",
-      entry: entry(".obsidian/websync-folders.json"),
+      entry: { ...entry(".obsidian/websync-folders.json"), hash: sha256Hex(content), size: content.length },
       contentBase64: content.toString("base64")
     });
 
@@ -715,7 +1082,7 @@ describe("SyncEngine helpers", () => {
       type: "remote-change",
       action: "put",
       originDeviceId: "phone",
-      entry: entry(".obsidian/websync-folders.json"),
+      entry: { ...entry(".obsidian/websync-folders.json"), hash: sha256Hex(content), size: content.length },
       contentBase64: content.toString("base64")
     });
 
@@ -730,7 +1097,7 @@ describe("SyncEngine helpers", () => {
     expect(await adapter.exists("Keep 有内容/note.md")).toBe(true);
   });
 
-  it("merges stale folder manifest acks instead of restoring remote-deleted folders", async () => {
+  it("merges stale folder manifests without pruning folders while the merge is pending", async () => {
     const { SyncEngine } = await import("../src/plugin/syncEngine");
     const baseContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old"] }));
     const localContent = Buffer.from(JSON.stringify({ version: 1, folders: ["Old", "New"] }));
@@ -743,7 +1110,7 @@ describe("SyncEngine helpers", () => {
     const state: LocalSyncState = {
       deviceId: "device-a",
       knownFiles: {
-        ".obsidian/websync-folders.json": { hash: sha256Hex(baseContent), revision: 1 }
+        ".obsidian/websync-folders.json": { hash: sha256Hex(baseContent), revision: 1, contentBase64: baseContent.toString("base64") }
       },
       pendingOps: [{
         opId: "folder-op",
@@ -790,6 +1157,7 @@ describe("SyncEngine helpers", () => {
       entry: {
         ...entry(".obsidian/websync-folders.json"),
         hash: sha256Hex(remoteContent),
+        size: remoteContent.length,
         revision: 2
       },
       canonicalContentBase64: remoteContent.toString("base64")
@@ -797,7 +1165,9 @@ describe("SyncEngine helpers", () => {
 
     const merged = JSON.parse(adapter.readUtf8(".obsidian/websync-folders.json")) as { folders: string[] };
     expect(merged.folders).toEqual(["New"]);
-    expect(await adapter.exists("Old")).toBe(false);
+    // Pending state is preserved until the merged manifest is acknowledged;
+    // conservatively leave the empty local folder during that interval.
+    expect(await adapter.exists("Old")).toBe(true);
     expect(await adapter.exists("New")).toBe(true);
     expect([...adapter.files.keys()].filter((path) => path.includes("conflict"))).toEqual([]);
     expect(state.pendingOps).toHaveLength(1);
@@ -807,6 +1177,76 @@ describe("SyncEngine helpers", () => {
       baseRevision: 2,
       folderManifestBaseFolders: []
     });
+  });
+
+  it("merges the latest local folder manifest, not the older in-flight snapshot", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = ".obsidian/websync-folders.json";
+    const base = Buffer.from(JSON.stringify({ version: 1, folders: ["Base"] }));
+    const sent = Buffer.from(JSON.stringify({ version: 1, folders: ["Base", "First"] }));
+    const local = Buffer.from(JSON.stringify({ version: 1, folders: ["Base", "First", "Later"] }));
+    const remote = Buffer.from(JSON.stringify({ version: 1, folders: ["Base", "Remote"] }));
+    const adapter = new FakeAdapter({ [path]: local });
+    const state: LocalSyncState = { deviceId: "device-a", knownFiles: { [path]: { hash: sha256Hex(base), revision: 1,
+      contentBase64: base.toString("base64") } }, pendingOps: [{ opId: "old", type: "put", path, baseRevision: 1, createdAt: 1 }] };
+    const engine = new SyncEngine({ app: { vault: { adapter, createFolder: async (folder: string) => { adapter.folders.add(folder); } } } as any,
+      getSettings: () => settings(), getState: () => state, save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    (engine as any).inflight.set("old", { ...state.pendingOps[0], contentBase64: sent.toString("base64"), baseContentBase64: base.toString("base64") });
+    await (engine as any).handleAck({ opId: "old", status: "stale", entry: { ...entry(path), hash: sha256Hex(remote), size: remote.length, revision: 2 },
+      canonicalContentBase64: remote.toString("base64") });
+    expect(JSON.parse(adapter.readUtf8(path)).folders.sort()).toEqual(["Base", "First", "Later", "Remote"]);
+    expect(state.pendingOps).toMatchObject([{ path, baseRevision: 2 }]);
+  });
+
+  it("blocks a folder merge when its base is missing or the file changes during atomic update", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = ".obsidian/websync-folders.json";
+    const base = Buffer.from(JSON.stringify({ version: 1, folders: [] }));
+    const local = Buffer.from(JSON.stringify({ version: 1, folders: ["Local"] }));
+    const remote = Buffer.from(JSON.stringify({ version: 1, folders: ["Remote"] }));
+    const latest = Buffer.from(JSON.stringify({ version: 1, folders: ["Local", "Latest"] }));
+    for (const missingBase of [true, false]) {
+      const adapter = new FakeAdapter({ [path]: local });
+      if (!missingBase) vi.spyOn(adapter, "process").mockImplementationOnce(async (file, fn) => {
+        await adapter.writeBinary(file, toArrayBuffer(latest));
+        return FakeAdapter.prototype.process.call(adapter, file, fn);
+      });
+      const state: LocalSyncState = { deviceId: "device-a", knownFiles: { [path]: { hash: sha256Hex(base), revision: 1,
+        ...(missingBase ? {} : { contentBase64: base.toString("base64") }) } }, pendingOps: [{ opId: "old", type: "put", path, baseRevision: 1, createdAt: 1 }] };
+      const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+        save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+      (engine as any).inflight.set("old", { ...state.pendingOps[0], contentBase64: local.toString("base64") });
+      await (engine as any).handleAck({ opId: "old", status: "stale", entry: { ...entry(path), hash: sha256Hex(remote), size: remote.length, revision: 2 },
+        canonicalContentBase64: remote.toString("base64") });
+      expect(adapter.readUtf8(path)).toBe((missingBase ? local : latest).toString());
+      expect(state.pendingOps).toMatchObject([{ path, blockedReason: "merge-conflict" }]);
+    }
+  });
+
+  it("preserves an unreadable, invalid or concurrently changed local folder manifest", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const path = ".obsidian/websync-folders.json";
+    const valid = Buffer.from(JSON.stringify({ version: 1, folders: [] }));
+    const latest = Buffer.from(JSON.stringify({ version: 1, folders: ["Later"] }));
+    for (const scenario of ["unreadable", "invalid", "concurrent"] as const) {
+      const original = scenario === "invalid" ? Buffer.from("invalid-json") : valid;
+      const adapter = new FakeAdapter({ [path]: original });
+      adapter.folders.add("Local");
+      if (scenario === "unreadable") vi.spyOn(adapter, "readBinary").mockRejectedValueOnce(new Error("storage unavailable"));
+      if (scenario === "concurrent") vi.spyOn(adapter, "process").mockImplementationOnce(async (file, fn) => {
+        await adapter.writeBinary(file, toArrayBuffer(latest));
+        return FakeAdapter.prototype.process.call(adapter, file, fn);
+      });
+      const state: LocalSyncState = { deviceId: "device-a", knownFiles: {}, pendingOps: [] };
+      const status = vi.fn();
+      const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+        save: vi.fn(async () => undefined), setStatus: status, registerEvent: vi.fn() });
+      await (engine as any).refreshFolderManifest();
+      expect(adapter.readUtf8(path)).toBe((scenario === "concurrent" ? latest : original).toString());
+      expect(state.pendingOps).toEqual([]);
+      expect(status).toHaveBeenCalledWith("sync needs attention");
+      expect(engine.getStatusSnapshot().blockedPaths).toContain(`${path} (needs review)`);
+    }
   });
 
   it("merges stale markdown acks and retries the merged file", async () => {
@@ -871,6 +1311,7 @@ describe("SyncEngine helpers", () => {
       entry: {
         ...entry("Wiki 知识网络/note.md"),
         hash: sha256Hex(remoteContent),
+        size: remoteContent.length,
         revision: 2
       },
       canonicalContentBase64: remoteContent.toString("base64")
@@ -885,6 +1326,44 @@ describe("SyncEngine helpers", () => {
       baseRevision: 2,
       baseContentBase64: remoteContent.toString("base64")
     });
+  });
+
+  it("merges from the latest local file, not the older in-flight snapshot", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const base = Buffer.from("title\nold body\n");
+    const sent = Buffer.from("phone title\nold body\n");
+    const latest = Buffer.from("phone title revised\nold body\n");
+    const remote = Buffer.from("title\nmac body\n");
+    const adapter = new FakeAdapter({ "note.md": latest });
+    const state: LocalSyncState = { deviceId: "phone", knownFiles: { "note.md": { hash: sha256Hex(base), revision: 1,
+      contentBase64: base.toString("base64") } }, pendingOps: [{ opId: "one", type: "put", path: "note.md", baseRevision: 1,
+      createdAt: 1, baseContentBase64: base.toString("base64") }] };
+    const engine = new SyncEngine({ app: { vault: { adapter, createFolder: vi.fn(async () => undefined) } } as any,
+      getSettings: () => settings(), getState: () => state, save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    (engine as any).inflight.set("one", { ...state.pendingOps[0], contentBase64: sent.toString("base64") });
+    await (engine as any).handleAck({ opId: "one", status: "stale", entry: { ...entry("note.md"), hash: sha256Hex(remote),
+      size: remote.length, revision: 2 }, canonicalContentBase64: remote.toString("base64") });
+    expect(adapter.readUtf8("note.md")).toBe("phone title revised\nmac body\n");
+    expect(state.pendingOps).toMatchObject([{ path: "note.md", baseRevision: 2 }]);
+  });
+
+  it("leaves overlapping local edits untouched and blocks the upload for review", async () => {
+    const { SyncEngine } = await import("../src/plugin/syncEngine");
+    const base = Buffer.from("old\n");
+    const local = Buffer.from("phone choice\n");
+    const remote = Buffer.from("mac choice\n");
+    const adapter = new FakeAdapter({ "note.md": local });
+    const state: LocalSyncState = { deviceId: "phone", knownFiles: { "note.md": { hash: sha256Hex(base), revision: 1,
+      contentBase64: base.toString("base64") } }, pendingOps: [{ opId: "one", type: "put", path: "note.md", baseRevision: 1,
+      createdAt: 1, baseContentBase64: base.toString("base64") }] };
+    const engine = new SyncEngine({ app: { vault: { adapter } } as any, getSettings: () => settings(), getState: () => state,
+      save: vi.fn(async () => undefined), setStatus: vi.fn(), registerEvent: vi.fn() });
+    (engine as any).inflight.set("one", { ...state.pendingOps[0], contentBase64: local.toString("base64") });
+    await (engine as any).handleAck({ opId: "one", status: "stale", entry: { ...entry("note.md"), hash: sha256Hex(remote),
+      size: remote.length, revision: 2 }, canonicalContentBase64: remote.toString("base64") });
+    expect(adapter.readUtf8("note.md")).toBe("phone choice\n");
+    expect(state.pendingOps).toMatchObject([{ path: "note.md", blockedReason: "merge-conflict", blockedRevision: 2 }]);
+    expect(state.knownFiles["note.md"].revision).toBe(1);
   });
 
   it("writes and queues the folder manifest for local empty folders", async () => {
@@ -1389,6 +1868,12 @@ class FakeAdapter {
 
   async writeBinary(path: string, content: ArrayBuffer): Promise<void> {
     this.files.set(this.resolveFileKey(path) ?? path, content.slice(0));
+  }
+
+  async process(path: string, fn: (text: string) => string): Promise<string> {
+    const result = fn(this.readUtf8(path));
+    await this.writeBinary(path, toArrayBuffer(Buffer.from(result)));
+    return result;
   }
 
   async remove(path: string): Promise<void> {

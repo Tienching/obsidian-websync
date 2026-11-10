@@ -7,14 +7,17 @@ import {
   ClientMessage,
   DeleteMessage,
   HelloMessage,
+  ManifestSnapshot,
   PullMessage,
   PROTOCOL_VERSION,
+  PutDeltaMessage,
   PutMessage,
   RemoteChangeMessage,
   ServerMessage
 } from "../shared/protocol";
 import { ManifestStore } from "./manifestStore";
 import { FileStore } from "./fileStore";
+import { applyByteDelta } from "../shared/byteDelta";
 
 interface ClientState {
   socket: WebSocket;
@@ -38,9 +41,16 @@ export class SyncHub {
   private readonly httpServer: HttpServer;
   private readonly wsServer: WebSocketServer;
   private readonly clients = new Map<WebSocket, ClientState>();
+  private readonly pageSnapshots = new Map<number, { snapshot: ManifestSnapshot; expiresAt: number }>();
 
   constructor(private readonly options: SyncHubOptions) {
-    this.httpServer = createServer((req, res) => this.handleHttp(req, res));
+    this.httpServer = createServer((req, res) => {
+      try {
+        this.handleHttp(req, res);
+      } catch {
+        this.failHttpRequest(res);
+      }
+    });
     this.wsServer = new WebSocketServer({ server: this.httpServer, path: "/sync", perMessageDeflate: false });
     this.wsServer.on("connection", (socket) => this.handleConnection(socket));
   }
@@ -85,9 +95,27 @@ export class SyncHub {
         this.unauthorized(res);
         return;
       }
-      const snapshot = this.options.manifestStore.snapshot();
+      const revisionParam = url.searchParams.get("revision");
+      const requestedRevision = revisionParam === null ? undefined : Number(revisionParam);
+      if (requestedRevision !== undefined && (!Number.isSafeInteger(requestedRevision) || requestedRevision < 0)) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "invalid snapshot revision" }));
+        return;
+      }
+      const snapshot = this.manifestPageSnapshot(requestedRevision);
+      if (!snapshot) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "snapshot expired; retry" }));
+        return;
+      }
       const offset = Number(url.searchParams.get("offset") ?? "0");
-      const limit = Math.min(Number(url.searchParams.get("limit") ?? "50"), 100);
+      const requestedLimit = Number(url.searchParams.get("limit") ?? "50");
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "invalid page" }));
+        return;
+      }
+      const limit = Math.min(requestedLimit, 100);
       const entries = Object.entries(snapshot.files);
       const page = entries.slice(offset, offset + limit);
       res.writeHead(200, { "content-type": "application/json" });
@@ -103,15 +131,15 @@ export class SyncHub {
       return;
     }
     if (url.pathname === "/oplog") {
-      void this.handleHttpOperationLog(req, res, url);
+      void this.handleHttpOperationLog(req, res, url).catch(() => this.failHttpRequest(res));
       return;
     }
     if (url.pathname === "/file") {
-      void this.handleHttpFile(req, res, url);
+      void this.handleHttpFile(req, res, url).catch(() => this.failHttpRequest(res));
       return;
     }
     if (url.pathname === "/file-chunk") {
-      void this.handleHttpFileChunk(req, res, url);
+      void this.handleHttpFileChunk(req, res, url).catch(() => this.failHttpRequest(res));
       return;
     }
     if (this.options.proxyTarget) {
@@ -120,6 +148,34 @@ export class SyncHub {
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
+  }
+
+  private manifestPageSnapshot(revision?: number): ManifestSnapshot | undefined {
+    this.options.manifestStore.assertReadable();
+    const now = Date.now();
+    for (const [key, cached] of this.pageSnapshots) {
+      if (cached.expiresAt <= now) this.pageSnapshots.delete(key);
+    }
+    if (revision !== undefined) {
+      const cached = this.pageSnapshots.get(revision);
+      if (cached) return cached.snapshot;
+    }
+    const current = this.options.manifestStore.snapshot();
+    if (revision !== undefined && current.revision !== revision) return undefined;
+    this.pageSnapshots.set(current.revision, { snapshot: current, expiresAt: now + 120_000 });
+    while (this.pageSnapshots.size > 8) this.pageSnapshots.delete(this.pageSnapshots.keys().next().value!);
+    return current;
+  }
+
+  private failHttpRequest(res: ServerResponse): void {
+    // Storage errors can contain sensitive endpoint details. Return a generic
+    // failure without allowing an unhandled rejection to terminate the server.
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "sync storage request failed" }));
   }
 
   private async handleHttpOperationLog(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -154,19 +210,33 @@ export class SyncHub {
       res.end(JSON.stringify({ ok: false, error: "file not found" }));
       return;
     }
-    const content = await this.options.fileStore.getFile(entry.path);
-    if (!content) {
+    const expectedHash = url.searchParams.get("hash");
+    if (expectedHash && expectedHash !== entry.hash) {
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "file changed during download" }));
+      return;
+    }
+    const offset = Number(url.searchParams.get("offset") ?? "0");
+    const requestedLength = Number(url.searchParams.get("length") ?? "32768");
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(requestedLength) || requestedLength < 1
+      || offset > entry.size || (entry.size > 0 && offset === entry.size)) {
+      res.writeHead(416, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid file range" }));
+      return;
+    }
+    const length = Math.min(requestedLength, 65536, entry.size - offset);
+    const chunk = length === 0 ? Buffer.alloc(0) : await this.options.manifestStore.readEntryRange(entry, offset, length);
+    if (!chunk) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "object not found" }));
       return;
     }
-    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0"));
-    const length = Math.min(Math.max(1, Number(url.searchParams.get("length") ?? "32768")), 65536);
-    const chunk = content.subarray(offset, offset + length);
+    if (chunk.length !== length) throw new Error("Stored file length does not match manifest");
     res.writeHead(200, {
       "content-type": "application/octet-stream",
-      "x-obsidian-sync-size": String(content.length),
-      "x-obsidian-sync-next-offset": String(offset + chunk.length < content.length ? offset + chunk.length : -1)
+      "x-obsidian-sync-size": String(entry.size),
+      "x-obsidian-sync-hash": entry.hash,
+      "x-obsidian-sync-next-offset": String(offset + chunk.length < entry.size ? offset + chunk.length : -1)
     });
     res.end(chunk);
   }
@@ -188,7 +258,7 @@ export class SyncHub {
       res.end(JSON.stringify({ ok: false, error: "file not found" }));
       return;
     }
-    const content = await this.options.fileStore.getFile(entry.path);
+    const content = await this.options.manifestStore.readEntryContent(entry);
     if (!content) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "object not found" }));
@@ -246,8 +316,12 @@ export class SyncHub {
 
   private handleConnection(socket: WebSocket): void {
     socket.on("message", (raw) => {
-      void this.handleMessage(socket, raw.toString()).catch((error) => {
-        this.send(socket, { type: "error", code: "server_error", message: error instanceof Error ? error.message : String(error) });
+      void this.handleMessage(socket, raw.toString()).catch(() => {
+        this.send(socket, { type: "error", code: "server_error", message: "Sync request failed; reconnecting safely" });
+        // The client retains its queue and retries on reconnect. Merely
+        // reporting an error can otherwise leave the upload in-flight for
+        // minutes, even after the storage service recovers.
+        socket.close(1011, "Temporary sync failure");
       });
     });
     socket.on("close", () => {
@@ -271,6 +345,10 @@ export class SyncHub {
 
     if (message.type === "put") {
       await this.handlePut(client, message);
+      return;
+    }
+    if (message.type === "put-delta") {
+      await this.handlePutDelta(client, message);
       return;
     }
     if (message.type === "delete") {
@@ -306,7 +384,50 @@ export class SyncHub {
       deviceName: message.deviceName,
       vaultId: message.vaultId
     });
-    this.send(socket, { type: "ready", revision: this.options.manifestStore.snapshot().revision });
+    this.send(socket, { type: "ready", revision: this.options.manifestStore.snapshot().revision, capabilities: ["put-delta-v1"] });
+  }
+
+  private async handlePutDelta(client: ClientState, message: PutDeltaMessage): Promise<void> {
+    if (!/\.(md|markdown)$/i.test(message.path) || typeof message.middleBase64 !== "string"
+      || !Number.isSafeInteger(message.size) || message.size < 0) {
+      this.send(client.socket, { type: "ack", opId: message.opId, status: "ignored", message: "Invalid delta request" });
+      return;
+    }
+    const previous = await this.options.manifestStore.findPutReceipt({ opId: message.opId, path: message.path,
+      baseRevision: message.baseRevision, hash: message.hash, size: message.size, deviceId: client.deviceId });
+    if (previous) {
+      if (previous.kind === "accepted") {
+        this.send(client.socket, { type: "ack", opId: message.opId, status: "accepted", entry: previous.entry });
+      } else if (previous.kind === "conflict") {
+        const canonical = await this.options.manifestStore.readEntryContent(previous.canonicalEntry);
+        this.send(client.socket, { type: "ack", opId: message.opId, status: "conflict", entry: previous.entry,
+          canonicalEntry: previous.canonicalEntry, canonicalContentBase64: canonical?.toString("base64") });
+      } else {
+        this.send(client.socket, { type: "ack", opId: message.opId, status: "ignored", message: previous.message });
+      }
+      return;
+    }
+    const current = this.options.manifestStore.snapshot().files[message.path];
+    if (!current || current.deleted || current.revision !== message.baseRevision || current.hash !== message.baseHash) {
+      const canonical = current && !current.deleted ? await this.options.manifestStore.readEntryContent(current) : undefined;
+      this.send(client.socket, { type: "ack", opId: message.opId, status: current ? "stale" : "ignored", entry: current,
+        canonicalContentBase64: canonical?.toString("base64"), message: "Delta base is no longer current" });
+      return;
+    }
+    const base = await this.options.manifestStore.readEntryContent(current);
+    if (!base || base.length !== current.size || createHash("sha256").update(base).digest("hex") !== current.hash) {
+      throw new Error("Stored delta base failed integrity verification");
+    }
+    const bytes = applyByteDelta(base, {
+      prefixLength: message.prefixLength, suffixLength: message.suffixLength, middle: Buffer.from(message.middleBase64, "base64")
+    });
+    const content = Buffer.from(bytes);
+    if (content.length !== message.size || createHash("sha256").update(content).digest("hex") !== message.hash) {
+      this.send(client.socket, { type: "ack", opId: message.opId, status: "ignored", message: "Delta failed integrity verification" });
+      return;
+    }
+    await this.handlePut(client, { type: "put", opId: message.opId, path: message.path, baseRevision: message.baseRevision,
+      hash: message.hash, size: message.size, mtime: message.mtime, contentBase64: content.toString("base64") });
   }
 
   private isAcceptedVaultId(vaultId: string): boolean {
@@ -344,7 +465,7 @@ export class SyncHub {
     }
 
     if (result.kind === "stale") {
-      const canonicalContent = await this.options.fileStore.getFile(result.entry.path);
+      const canonicalContent = result.entry.deleted ? undefined : await this.options.manifestStore.readEntryContent(result.entry);
       this.send(client.socket, {
         type: "ack",
         opId: message.opId,
@@ -357,7 +478,7 @@ export class SyncHub {
     }
 
     if (result.kind === "conflict") {
-      const canonicalContent = await this.options.fileStore.getFile(result.canonicalEntry.path);
+      const canonicalContent = await this.options.manifestStore.readEntryContent(result.canonicalEntry);
       const ack: AckMessage = {
         type: "ack",
         opId: message.opId,
@@ -367,7 +488,7 @@ export class SyncHub {
         canonicalContentBase64: canonicalContent?.toString("base64")
       };
       this.send(client.socket, ack);
-      this.broadcast(client.deviceId, {
+      if (!result.replayed) this.broadcast(client.deviceId, {
         type: "remote-change",
         originDeviceId: client.deviceId,
         action: "put",
@@ -378,7 +499,7 @@ export class SyncHub {
     }
 
     this.send(client.socket, { type: "ack", opId: message.opId, status: "accepted", entry: result.entry });
-    this.broadcast(client.deviceId, {
+    if (!result.replayed) this.broadcast(client.deviceId, {
       type: "remote-change",
       originDeviceId: client.deviceId,
       action: "put",
@@ -406,7 +527,7 @@ export class SyncHub {
     }
 
     this.send(client.socket, { type: "ack", opId: message.opId, status: "deleted", entry: result.entry });
-    this.broadcast(client.deviceId, {
+    if (!result.replayed) this.broadcast(client.deviceId, {
       type: "remote-change",
       originDeviceId: client.deviceId,
       action: "delete",
@@ -435,7 +556,7 @@ export class SyncHub {
       return;
     }
 
-    const content = await this.options.fileStore.getFile(entry.path);
+    const content = await this.options.manifestStore.readEntryContent(entry);
     if (!content) {
       this.send(client.socket, { type: "file-content", opId: message.opId, status: "missing", entry });
       return;

@@ -1,17 +1,22 @@
 import { Notice, Plugin } from "obsidian";
-import { loadLocalState, LocalSyncState, saveLocalState } from "./localState";
+import { createEmptyState, loadLocalState, LocalSyncState, saveLocalState } from "./localState";
 import { ForceScanOptions, SyncEngine, SyncStatusSnapshot } from "./syncEngine";
 import { createDefaultData, SyncPluginData, SyncPluginSettings, WebSyncSettingTab } from "./settings";
 
 export default class WebSyncPlugin extends Plugin {
   data: SyncPluginData = createDefaultData();
-  private localState: LocalSyncState = loadLocalState(this.data.settings.vaultId);
+  private localState: LocalSyncState = createEmptyState();
   private engine?: SyncEngine;
   private statusEl?: HTMLElement;
 
   async onload(): Promise<void> {
     this.data = mergeData(createDefaultData(), (await this.loadData()) as LoadedSyncPluginData);
-    this.localState = loadLocalState(this.data.settings.vaultId);
+    try {
+      this.localState = loadLocalState(this.data.settings.vaultId);
+    } catch (error) {
+      new Notice(`WebSync paused: ${error instanceof Error ? error.message : String(error)}`, 0);
+      return;
+    }
     await this.savePluginData();
 
     this.statusEl = this.addStatusBarItem();
@@ -84,7 +89,7 @@ export async function runManualForceScan(engine: ManualForceScanEngine | undefin
 
   try {
     await engine.forceScan({ waitForIdle: true, idleTimeoutMs: 30_000 });
-    new Notice("WebSync sync complete");
+    new Notice("WebSync local upload queue is empty; other devices may still be syncing");
   } catch (error) {
     new Notice(`WebSync sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -99,13 +104,16 @@ function formatStatusSnapshot(snapshot: SyncStatusSnapshot): string {
     lines.push(`Remote revision: ${snapshot.remoteRevision}`);
   }
   if (snapshot.lastSyncedAt) {
-    lines.push(`Last synced: ${snapshot.lastSyncedAt}`);
+    lines.push(`Last local sync activity: ${snapshot.lastSyncedAt}`);
   }
   if (snapshot.lastError) {
     lines.push(`Last error: ${snapshot.lastError}`);
   }
   if (snapshot.queuedPaths.length > 0) {
     lines.push(`Queued: ${snapshot.queuedPaths.slice(0, 3).join(", ")}`);
+  }
+  if (snapshot.blockedPaths.length > 0) {
+    lines.push(`Needs review: ${snapshot.blockedPaths.slice(0, 3).join(", ")}`);
   }
   if (snapshot.inflightPaths.length > 0) {
     lines.push(`Inflight: ${snapshot.inflightPaths.slice(0, 3).join(", ")}`);

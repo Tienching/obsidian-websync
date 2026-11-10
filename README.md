@@ -1,4 +1,8 @@
-# Obsidian WebSync
+# Obsidian WebSync — 0.2.0-dev.1
+
+> **Experimental development version — not production-ready.** The 0.2.0-dev.1 code has not been validated on real Obsidian devices or against a production migration. The real-device checks performed so far used the older 0.1.15 plugin, not this version. Its schema-2 storage changes cannot be safely rolled back by simply restarting the old server. Do not install this version in an active vault, run it against a production service or bucket, or treat a connected status as proof that all devices received every change. All procedures below are for isolated synthetic test environments only.
+
+Before any production rollout, independently back up the vault, server state and cloud objects; verify restoration and migration/rollback in isolation; test real devices and coordinate their upgrades. Overlapping edits or deletion-versus-edit conflicts can still require manual resolution. Mobile background execution, uninterrupted network connectivity and sub-second delivery are not guaranteed. Cloud manifests are not protected against concurrent independent server writers, large uploads are not resumable, and unreferenced blobs do not yet have a safe automatic cleanup policy.
 
 WebSync is a private realtime sync stack for an Obsidian vault. It is designed for a personal multi-device setup where a lightweight Obsidian plugin talks to a Node.js sync service, and the service persists files plus the manifest in Tencent COS.
 
@@ -13,7 +17,7 @@ Obsidian plugin
   - Pulls remote changes and writes them to the vault.
   - Keeps an offline queue, adaptive debounce policy, and conflict copies.
   - Merges non-overlapping Markdown edits with a three-way merge.
-  - Syncs WebSync's own plugin files after bootstrap.
+  - Requires a coordinated manual upgrade of WebSync's own executable files.
 
 Node sync service
   - Authenticates clients with a shared token.
@@ -30,7 +34,7 @@ Server vault mirror
   - Preserves dirty local mirror files under a conflict directory before applying remote content.
 
 Tencent COS
-  - Stores durable files under COS_PREFIX/files/.
+  - Reads legacy path-addressed files under COS_PREFIX/files/ and stores new versions under COS_PREFIX/blobs/sha256/.
   - Stores the current manifest under COS_PREFIX/meta/manifest.json.
 ```
 
@@ -58,20 +62,18 @@ Generated build output goes to `dist/` and is ignored by git. Runtime state such
 - Folder changes, Markdown edits, plugin resources, and binary files use different debounce delays.
 - Sync direction is configurable per device: two-way, pull-only, or push-only.
 - Non-overlapping Markdown conflicts are merged client-side and retried automatically.
-- Overlapping Markdown conflicts and binary conflicts are preserved as `(... conflict from DEVICE TIMESTAMP)` files.
+- Overlapping Markdown conflicts pause the affected item while retaining the local content; stale binary uploads may be preserved as `(... conflict from DEVICE TIMESTAMP)` files.
 - Conflict device names are resolved automatically from the local host/platform; they are not user-configured plugin settings.
 - Empty folders are synced through `.obsidian/websync-folders.json`.
 - The command palette has `WebSync: Show sync diagnostics` for queue, inflight, revision, last sync, and last error state.
 - The service exposes an authorized `GET /oplog?after=REV&limit=N` endpoint for recent operation diagnostics.
 - The optional server mirror process keeps `/home/ubuntu/obsidian-vaults/jonaszchen` close to realtime for Hermes and other server-side agents.
-- Snapshot tombstones delete local files. Empty folder creation and pruning are controlled by `.obsidian/websync-folders.json`.
+- Snapshot tombstones move clean local files to local trash; a deletion conflicting with local changes is blocked. Empty folder creation and pruning are controlled by `.obsidian/websync-folders.json`.
 - `.obsidian` sync defaults to a standard stable set:
   - synced: `.obsidian/community-plugins.json`
   - synced: `.obsidian/websync-folders.json`
   - synced in `Standard`: stable Obsidian config such as `app.json`, `appearance.json`, `core-plugins.json`, `daily-notes.json`, `graph.json`, and `types.json`
-  - synced: `.obsidian/plugins/websync/main.js`
-  - synced: `.obsidian/plugins/websync/manifest.json`
-  - synced: `.obsidian/plugins/websync/styles.css`
+  - not automatically overwritten: `.obsidian/plugins/websync/main.js`, `manifest.json`, and `styles.css`
   - optionally synced: selected plugin resource folders under `.obsidian/plugins/<plugin-id>/`
   - never synced: plugin `data.json`, WebSync queues, workspaces, sync credentials, and other device-local Obsidian config
 
@@ -83,7 +85,7 @@ Generated build output goes to `dist/` and is ignored by git. Runtime state such
 - A server reachable by HTTPS/WSS
 - Obsidian desktop or mobile
 
-## Setup
+## Setup (isolated testing only)
 
 Install dependencies:
 
@@ -137,7 +139,7 @@ Build only the server:
 npm run build:server
 ```
 
-## Install Plugin Locally
+## Install Plugin Locally (isolated test vault only)
 
 By default this installs into `~/Documents/Obsidian`:
 
@@ -175,7 +177,7 @@ Obsidian config sync has three modes:
 
 Plugin `data.json` files are always excluded because they often contain tokens, local paths, or device-specific state.
 
-## Run Server
+## Run Server (isolated testing only)
 
 After building:
 
@@ -203,7 +205,7 @@ deploy/systemd/websync-vault-mirror.service
 
 The mirror is intentionally pull-only. It never sends `put` or `delete`; server-side edits should still be pushed with the normal WebSync helper after the agent finishes a coherent change.
 
-The production deployment should put Caddy, Nginx, or another reverse proxy in front of the service and expose:
+A future production deployment would need Caddy, Nginx, or another reverse proxy in front of the service and expose:
 
 ```text
 https://your-domain/healthz
@@ -222,28 +224,15 @@ All non-health endpoints require `Authorization: Bearer <OBS_SYNC_TOKEN>`.
 
 ## Seed Remote State
 
-Seed through the live sync service:
+Both historical seeding commands are disabled in this development version.
+Direct COS seeding can replace the cloud manifest or delete an entire prefix;
+the vault seeder can overwrite or resurrect remote files based on a snapshot.
+A safe initialization, migration and recovery procedure must be designed and
+tested before either command is enabled.
 
-```bash
-OBS_SYNC_TOKEN=your-token npm run seed:vault
-```
-
-Directly seed COS and optionally wipe the COS prefix first:
-
-```bash
-COS_BUCKET=your-cos-bucket \
-COS_REGION=ap-guangzhou \
-COS_PREFIX=_websync \
-COS_SECRET_ID=... \
-COS_SECRET_KEY=... \
-SEED_WIPE=true \
-SEED_WIPE_CONFIRM=_websync \
-npm run seed:cos
-```
-
-`seed:cos` is useful when resetting a prefix cleanly. It refuses to wipe unless `SEED_WIPE_CONFIRM` matches the target prefix.
-
-The sync service treats the local `OBS_SYNC_DATA_DIR/manifest.json` as the first startup source and only falls back to COS when that file is missing or unreadable. If you directly reset or edit COS, stop the service first and make the matching change to the exact server `OBS_SYNC_DATA_DIR/manifest.json` as well, or remove the local manifest intentionally so the next start loads from COS. After any manual manifest cleanup, restart the service and verify `/manifest-page` before clients reconnect.
+The revised server checks local and cloud manifests against each other and
+refuses ambiguous states. Do not delete or manually rewrite either manifest to
+force a startup; protect independent backups and investigate recovery first.
 
 ## Mobile Bootstrap
 
@@ -254,16 +243,19 @@ If a mobile device does not have WebSync installed yet, it needs a bootstrap pat
 - `.obsidian/plugins/websync/data.json` for initial setup
 - `.obsidian/websync-folders.json`
 
-After WebSync is installed and enabled, WebSync can update its own plugin files. Obsidian still needs a full restart before newly downloaded plugin code is loaded.
+This version excludes its own plugin files from automatic sync. Any future
+upgrade must be installed and verified independently on every device; simply
+restarting Obsidian will not install an update.
 
-If a mobile client already has an old WebSync config and the bootstrap tool is unavailable, keep the production `OBS_SYNC_VAULT_ID` as the canonical vault id and temporarily put the old mobile value in `OBS_SYNC_VAULT_ALIASES`. This lets the stale client reconnect long enough to download the current plugin and vault content without exposing COS credentials.
+Do not reconnect an old mobile client to a migrated production service until a
+tested upgrade, compatibility and rollback plan is in place.
 
-Recommended mobile flow:
+Isolated mobile testing requires a disposable test vault and service:
 
 1. Use the bootstrap sync once to place WebSync on the phone.
 2. Enable WebSync.
-3. Let WebSync connect and pull updates.
-4. Fully quit and reopen Obsidian so the latest WebSync code is loaded.
+3. Let WebSync connect and pull synthetic test content.
+4. Fully quit and reopen Obsidian after manually installing plugin code.
 5. Keep any bootstrap tool disabled or pull-only to avoid double-sync conflicts.
 
 ## Empty Folder Sync
@@ -278,7 +270,7 @@ The plugin automatically updates this file after local folder create, delete, or
 
 ## Case-Only Renames
 
-Case-only renames, such as `WIKI` to `Wiki`, are risky on case-insensitive filesystems. The plugin now handles remote tombstones by deleting local files and pruning empty parent folders, but operationally it is still safer to:
+Case-only renames, such as `WIKI` to `Wiki`, are risky on case-insensitive filesystems. The plugin moves clean local files to trash for remote tombstones and blocks deletion when it conflicts with a local edit. In an isolated test it is still safer to:
 
 1. Ensure all devices have the latest plugin.
 2. Apply the rename on one canonical device.
