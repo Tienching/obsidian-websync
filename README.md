@@ -277,7 +277,9 @@ does not distribute its own executable files. Before updating, independently
 back up the vault and device sync state, wait for the queue to drain, and check
 the release notes and compatibility. Verify one device before updating another.
 
-Releases are marked prerelease, not a guarantee of production readiness. To make one,
+GitHub marks `0.1.16` as Latest for distribution; that label is not a guarantee
+of production readiness. The automated workflow creates future versions as
+prereleases by default. To make one,
 update `manifest.json`, `package.json`, `package-lock.json`, and `versions.json`
 to the same version and push the changes to `main`, or push a tag
 that exactly matches the version without a `v` prefix. The prerelease workflow

@@ -1,0 +1,25 @@
+name: Promote 0.1.16 for update discovery
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/promote-0.1.16.yml
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Mark existing release latest without changing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit 0.1.16 --prerelease=false --latest --notes-file .github/LATEST_0.1.16_NOTES.md
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" = 0.1.16
