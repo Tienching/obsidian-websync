@@ -1,14 +1,14 @@
-# Obsidian WebSync — 0.2.0-dev.1
+# Obsidian WebSync — 0.2.0-dev.2
 
-> **Experimental development version — not production-ready.** The 0.2.0-dev.1 code has not been validated on real Obsidian devices or against a production migration. The real-device checks performed so far used the older 0.1.15 plugin, not this version. Its schema-2 storage changes cannot be safely rolled back by simply restarting the old server. Do not install this version in an active vault, run it against a production service or bucket, or treat a connected status as proof that all devices received every change. All procedures below are for isolated synthetic test environments only.
+> **Experimental development version — not production-ready.** Version 0.2.0-dev.1 received limited checks on one real Mac against a legacy server; 0.2.0-dev.2 changes release packaging and version metadata, not the sync engine. Real mobile devices, production migration, rollback and concurrent-device conflicts have not been validated for this version. Its schema-2 storage changes cannot be safely rolled back by simply restarting the old server. Do not install this version in an active vault, run it against a production service or bucket, or treat a connected status as proof that all devices received every change. All procedures below are for isolated synthetic test environments only.
 
 Before any production rollout, independently back up the vault, server state and cloud objects; verify restoration and migration/rollback in isolation; test real devices and coordinate their upgrades. Overlapping edits or deletion-versus-edit conflicts can still require manual resolution. Mobile background execution, uninterrupted network connectivity and sub-second delivery are not guaranteed. Cloud manifests are not protected against concurrent independent server writers, large uploads are not resumable, and unreferenced blobs do not yet have a safe automatic cleanup policy.
 
 An isolated simulation of the old 0.1.15 client showed that a local edit made
 inside its 2.5-second suppression window after a remote write may not be
 queued. The development client rechecks changes in that window in simulated
-tests, but this has not yet been verified on real devices. This observation
-does not establish the cause of any particular user's delayed edit.
+tests, and one such check succeeded on a real Mac. This does not establish the
+cause of any particular user's delayed edit or prove other devices are safe.
 
 WebSync is a private realtime sync stack for an Obsidian vault. It is designed for a personal multi-device setup where a lightweight Obsidian plugin talks to a Node.js sync service, and the service persists files plus the manifest in Tencent COS.
 
@@ -23,7 +23,7 @@ Obsidian plugin
   - Pulls remote changes and writes them to the vault.
   - Keeps an offline queue, adaptive debounce policy, and conflict copies.
   - Merges non-overlapping Markdown edits with a three-way merge.
-  - Requires a coordinated manual upgrade of WebSync's own executable files.
+  - Requires a coordinated per-device upgrade of WebSync's own executable files.
 
 Node sync service
   - Authenticates clients with a shared token.
@@ -251,7 +251,8 @@ If a mobile device does not have WebSync installed yet, it needs a bootstrap pat
 
 This version excludes its own plugin files from automatic sync. Any future
 upgrade must be installed and verified independently on every device; simply
-restarting Obsidian will not install an update.
+restarting Obsidian will not install an update. BRAT can provide a manual
+one-click update on each device after one-time installation and configuration.
 
 Do not reconnect an old mobile client to a migrated production service until a
 tested upgrade, compatibility and rollback plan is in place.
@@ -263,6 +264,29 @@ Isolated mobile testing requires a disposable test vault and service:
 3. Let WebSync connect and pull synthetic test content.
 4. Fully quit and reopen Obsidian after manually installing plugin code.
 5. Keep any bootstrap tool disabled or pull-only to avoid double-sync conflicts.
+
+## Experimental releases and BRAT
+
+This project is not in the Obsidian community plugin catalog, so Obsidian's
+native community-plugin update checker cannot update it directly. For an
+isolated test vault, install the community plugin **BRAT**, add
+`Tienching/obsidian-websync`, and select `latest` rather than a frozen version.
+BRAT reads GitHub releases (including prereleases) and provides an update
+command or button. Install and configure BRAT separately on each device; WebSync
+does not distribute its own executable files. Before updating, independently
+back up the vault and device sync state, wait for the queue to drain, and check
+the release notes and compatibility. Verify one device before updating another.
+
+Releases are prereleases, not a guarantee of production readiness. To make one,
+update `manifest.json`, `package.json`, `package-lock.json`, and `versions.json`
+to the same prerelease version and push the changes to `main`, or push a tag
+that exactly matches the version without a `v` prefix. The prerelease workflow
+runs the checks, creates the matching tag if necessary, and publishes
+`main.js`, `manifest.json`, and `styles.css` as separate release assets; it
+refuses inconsistent metadata and non-prerelease tags, never replaces an
+existing release, and refuses an existing tag pointing to a different commit.
+GitHub Actions must be enabled and allowed to create releases. Inspect the
+workflow and the published assets before relying on the release.
 
 ## Empty Folder Sync
 

@@ -1,7 +1,7 @@
 {
   "id": "websync",
   "name": "WebSync",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "minAppVersion": "1.5.0",
   "description": "Isolated WebSync prototype; do not install in an active vault.",
   "author": "Jonaszchen",

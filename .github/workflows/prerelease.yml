@@ -1,0 +1,71 @@
+name: Build and publish experimental plugin prerelease
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - manifest.json
+      - package.json
+      - package-lock.json
+      - versions.json
+      - .github/workflows/prerelease.yml
+    tags:
+      - '*'
+
+permissions:
+  contents: read
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: node --test tests/fixtures/realCosSafety.test.cjs
+      - run: npm run build:plugin
+      - name: Verify tag, metadata and assets
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          node scripts/check-release.mjs "$VERSION"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$VERSION" ]; then
+            echo 'Tag must exactly match the plugin version' >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --json tagName >/dev/null 2>&1; then
+            echo "Release $VERSION already exists; not replacing it."
+            exit 0
+          fi
+          if [ -n "$(git ls-remote --refs origin "refs/tags/$VERSION")" ]; then
+            git fetch --no-tags origin "refs/tags/$VERSION:refs/tags/$VERSION"
+            test "$(git rev-parse "refs/tags/$VERSION^{commit}")" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$VERSION" -f "sha=$GITHUB_SHA" >/dev/null
+          fi
+          gh release create "$VERSION" \
+            dist/plugin/main.js dist/plugin/manifest.json dist/plugin/styles.css \
+            --verify-tag --prerelease --title "$VERSION" \
+            --notes-file .github/PRERELEASE_NOTES.md
